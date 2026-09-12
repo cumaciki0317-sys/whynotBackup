@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
@@ -2228,7 +2228,13 @@ export default function App() {
       clearTimeout(timeoutId);
       if (res.ok) {
         const data: RoomDetails = await res.json();
-        if (requestSequence !== roomFetchSequenceRef.current) return;
+        if (requestSequence !== roomFetchSequenceRef.current) {
+          if (!isFetchingRoomRef.current) {
+            setLoading(false);
+            setRefreshing(false);
+          }
+          return;
+        }
         console.log(`[SYNC] 회의 정보 조회 완료. 현재 단계: ${data?.room?.status}, 아이디어 수: ${data?.ideas?.length}`);
         console.log(`[SYNC] 고유 참여자 계산 완료. 제출 완료 참여자 수: ${data?.completedParticipantsCount}`);
 
@@ -2287,11 +2293,6 @@ export default function App() {
         setIsReEditingEvaluation(Boolean(data.isEvaluationReediting));
         const completedIdeaStep = Boolean((data as any).hasCompletedIdeaSubmission);
         setShowIdeaSubmissionGate(data.room.status === 'IDEA_SUBMISSION' && completedIdeaStep);
-        if (data.room.status === 'IDEA_SUBMISSION' && completedIdeaStep) {
-          localStorage.setItem(`why_not_idea_step_gate_${data.room.id}`, 'true');
-        } else {
-          localStorage.removeItem(`why_not_idea_step_gate_${data.room.id}`);
-        }
 
         if (data?.room?.status === 'CRITERIA_REVIEW') {
           setEditableCriteria(data.criteria || []);
@@ -2328,7 +2329,13 @@ export default function App() {
       }
     }
 
-    if (requestSequence !== roomFetchSequenceRef.current) return;
+    if (requestSequence !== roomFetchSequenceRef.current) {
+      if (!isFetchingRoomRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+      return;
+    }
 
     if (isFetched) {
       console.log('[SYNC] 초기 로딩 종료 (Express 성공)');
@@ -2648,7 +2655,6 @@ export default function App() {
     setFetchRoomError(false);
     setIsReEditingEvaluation(false);
     setShowIdeaSubmissionGate(false);
-    localStorage.removeItem(`why_not_idea_step_gate_${id}`);
     localStorage.removeItem('why_not_active_room_id');
     sessionStorage.removeItem('why_not_pending_room_id');
     const nick = customNickname || currentSavedNickname || nickname;
