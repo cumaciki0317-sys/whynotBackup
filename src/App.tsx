@@ -5539,9 +5539,9 @@ export default function App() {
                                 </h3>
                                 <p className="text-xs text-slate-500 leading-relaxed max-w-md mx-auto">
                                   {isIdeaGateMinMet
-                                    ? roomDetails.room.decisionMode === 'QUICK'
-                                      ? '선택지가 모두 모였습니다. 다른 사람의 선택을 보지 않는 익명 투표를 시작할 수 있습니다.'
-                                      : '최소 응답 정족수가 달성되어, 안전하게 2단계 평가 기준 설정 단계로 진입할 준비가 완료되었습니다.'
+                                    ? roomDetails.room.hostId === userId
+                                      ? '팀 내 최소 응답 수와 아이디어 등록 조건을 모두 충족했습니다. 방장은 아래 버튼을 눌러 2단계로 진행할 수 있습니다.'
+                                      : '팀 내 최소 응답 수와 아이디어 등록 조건을 모두 충족했습니다. 방장이 다음 단계로 이동하면 모든 참여자가 함께 2단계로 이동합니다.'
                                     : targetTotalCount < 2
                                       ? '한 명이 탈퇴했거나 아직 참여자가 부족합니다. 새 참여자가 합류한 뒤 남은 참여자 전원이 완료하면 방장이 다음 단계로 진행할 수 있습니다.'
                                       : '등록 내용을 동시에 공개하기 위해 현재 참여자 전원이 완료를 눌러야 다음 단계로 진행할 수 있습니다.'}
@@ -5597,6 +5597,13 @@ export default function App() {
                                       </>
                                     )}
                                   </button>
+                                )}
+
+                                {isIdeaGateMinMet && roomDetails.room.hostId !== userId && (
+                                  <div className="px-5 py-2.5 bg-indigo-50 border border-indigo-200 text-indigo-900 rounded-2xl text-xs font-bold flex items-center gap-2">
+                                    <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+                                    <span>모든 조건을 충족했어요! 🎉 방장이 다음 단계로 이동하면 자동으로 함께 이동합니다.</span>
+                                  </div>
                                 )}
                               </div>
                             </div>
