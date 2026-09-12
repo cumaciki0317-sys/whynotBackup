@@ -4227,7 +4227,7 @@ function isHostOnlyRoomMutation(req: Request): boolean {
   const suffix = req.path.split('/').slice(4).join('/');
   if (req.method === 'PATCH' && !suffix) return true;
   if (req.method === 'DELETE' && (
-    suffix === 'invites' || suffix.startsWith('account-invites/') || suffix.startsWith('voters/')
+    !suffix || suffix === 'invites' || suffix.startsWith('account-invites/') || suffix.startsWith('voters/')
   )) return true;
   if (req.method !== 'POST') return false;
   return (
@@ -4757,6 +4757,73 @@ app.delete('/api/rooms/:id/hide', async (req: AuthenticatedRequest, res) => {
   });
   if (error) return res.status(error.code === 'P0001' ? 409 : 503).json({ error: error.message || '회의실 보관 상태를 해제하지 못했습니다.' });
   return res.json(data || { success: true, archived: false });
+});
+
+/**
+ * DELETE /api/rooms/:id
+ * Host-only endpoint to permanently delete a room and all cascading details.
+ */
+app.delete('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
+  await requireAuth(req, res, async () => {
+    const { id } = req.params;
+    const userId = req.auth!.userId;
+    console.log(`[DEBUG DELETE ROOM] Request received. roomId: ${id}, userId: ${userId}`);
+
+    // Hydrate or fetch room to check authorization
+    const existingRoom = await hydrateRoomFromSupabase(id);
+    const roomHostId = existingRoom?.hostId || rooms.get(id)?.hostId;
+    console.log(`[DEBUG DELETE ROOM] existingRoom found: ${Boolean(existingRoom)}, roomHostId: ${roomHostId}`);
+
+    if (!existingRoom && !rooms.has(id)) {
+      console.log(`[DEBUG DELETE ROOM] Room not found in Supabase or memory.`);
+      return res.status(404).json({ error: '회의실을 찾을 수 없습니다.' });
+    }
+
+    if (roomHostId !== userId) {
+      console.log(`[DEBUG DELETE ROOM] Host mismatch. roomHostId: ${roomHostId}, userId: ${userId}`);
+      return res.status(403).json({ error: '방장만 회의실을 삭제할 수 있습니다.' });
+    }
+
+    if (SUPABASE_CONFIGURED) {
+      console.log(`[DEBUG DELETE ROOM] Executing Supabase DELETE for id: ${id}, host_id: ${userId}`);
+      const { data, error } = await supabase
+        .from('rooms')
+        .delete()
+        .eq('id', id)
+        .eq('host_id', userId)
+        .select('id');
+
+      if (error) {
+        console.error('[ROOM DELETE ERROR]', error);
+        return res.status(500).json({ error: `회의실 삭제 중 DB 오류가 발생했습니다: ${error.message}` });
+      }
+      console.log(`[DEBUG DELETE ROOM] Supabase delete data returned:`, data);
+      if (!data || data.length === 0) {
+        return res.status(404).json({ error: '삭제할 회의실을 찾지 못했거나 이미 삭제되었습니다.' });
+      }
+    }
+
+    // Perform in-memory cleanup
+    rooms.delete(id);
+    ideas.delete(id);
+    criteria.delete(id);
+    criterionProposals.delete(id);
+    participants.delete(id);
+    participantRolesMap.delete(id);
+    evaluations.delete(id);
+    eliminationRounds.delete(id);
+    aiFinalSummaries.delete(id);
+    starVotesMap.delete(id);
+    reEditingEvaluatorsMap.delete(id);
+    ideaCompletedUsersMap.delete(id);
+    criteriaCompletedUsersMap.delete(id);
+    criteriaSetApprovalsMap.delete(id);
+    roomDecisionModesMap.delete(id);
+
+    saveLocalState();
+
+    return res.json({ success: true, message: '회의실이 삭제되었습니다.' });
+  });
 });
 
 app.delete('/api/rooms/:id/leave', async (req: AuthenticatedRequest, res) => {

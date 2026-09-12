@@ -32,7 +32,8 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
-  Share2
+  Share2,
+  MoreVertical
 } from 'lucide-react';
 import {
   Room,
@@ -432,6 +433,9 @@ export default function App() {
   const [isFetchRoomsLoading, setIsFetchRoomsLoading] = useState<boolean>(false);
   const [fetchRoomsError, setFetchRoomsError] = useState<boolean>(false);
   const [isJoinCodeModalOpen, setIsJoinCodeModalOpen] = useState(false);
+  const [deletingRoomId, setDeletingRoomId] = useState<string | null>(null);
+  const [isDeletingRoom, setIsDeletingRoom] = useState(false);
+  const [activeRoomMenuId, setActiveRoomMenuId] = useState<string | null>(null);
 
   const filteredRoomsList = useMemo(() => {
     return roomsList.filter(room => {
@@ -2505,6 +2509,39 @@ export default function App() {
       triggerToast(data?.isPinned ? '★ 상단 고정되었습니다. (ON)' : '☆ 상단 고정이 해제되었습니다. (OFF)');
     } catch (err) {
       triggerToast(err instanceof Error ? err.message : '고정 상태를 저장하지 못했습니다.', 'error');
+    }
+  };
+
+  // Permanently delete a room (Host only action)
+  const handleConfirmDeleteRoom = async () => {
+    if (!deletingRoomId || isDeletingRoom) return;
+    const targetRoomId = deletingRoomId;
+    setIsDeletingRoom(true);
+
+    try {
+      const res = await apiFetch(`/api/rooms/${targetRoomId}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || '회의실을 삭제하지 못했습니다.');
+
+      setDeletingRoomId(null);
+      setActiveRoomMenuId(null);
+      triggerToast('회의실이 삭제되었습니다.');
+
+      // Remove from state immediately
+      setRoomsList(prev => prev.filter(r => r.id !== targetRoomId));
+
+      // Safely return to lobby/dashboard if active room was deleted
+      if (activeRoomId === targetRoomId) {
+        setActiveRoomId(null);
+        setRoomDetails(null);
+        window.history.pushState({}, '', '/');
+      }
+
+      await fetchRooms();
+    } catch (err) {
+      triggerToast(err instanceof Error ? err.message : '회의실을 삭제하지 못했습니다.', 'error');
+    } finally {
+      setIsDeletingRoom(false);
     }
   };
 
@@ -5150,6 +5187,41 @@ export default function App() {
                                         }`}
                                     />
                                   </button>
+                                )}
+
+                                {(room.isHost || room.hostId === userId) && (
+                                  <div className="relative">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setActiveRoomMenuId(prev => prev === room.id ? null : room.id);
+                                      }}
+                                      title="더보기 메뉴"
+                                      className="p-1.5 rounded-full bg-slate-50 text-slate-500 border border-slate-200 hover:text-slate-900 hover:bg-slate-100 transition flex items-center justify-center cursor-pointer"
+                                    >
+                                      <MoreVertical className="w-3.5 h-3.5" />
+                                    </button>
+                                    {activeRoomMenuId === room.id && (
+                                      <div
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="absolute right-0 top-full mt-1.5 w-36 bg-white border border-slate-200 rounded-xl shadow-lg z-30 overflow-hidden py-1"
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setActiveRoomMenuId(null);
+                                            setDeletingRoomId(room.id);
+                                          }}
+                                          className="w-full text-left px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 transition flex items-center gap-1.5 cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                                          <span>회의실 삭제</span>
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
                                 )}
                               </div>
                             </div>
@@ -9912,6 +9984,61 @@ export default function App() {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Room Delete Confirmation Modal */}
+        {deletingRoomId && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-3xl p-6 border border-slate-200 max-w-md w-full shadow-2xl space-y-5"
+            >
+              <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                <div className="w-10 h-10 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center border border-rose-100 shrink-0">
+                  <Trash2 className="w-5 h-5 text-rose-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900">회의실을 삭제할까요?</h3>
+                  <p className="text-xs text-slate-400 font-medium">영구 삭제 확인</p>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 p-3.5 rounded-2xl border border-slate-100 font-medium">
+                삭제하면 이 회의실의 아이디어, 평가, 투표 및 결과 데이터가 모두 삭제되며 복구할 수 없습니다.
+              </p>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isDeletingRoom}
+                  onClick={() => setDeletingRoomId(null)}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer disabled:opacity-50"
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingRoom}
+                  onClick={handleConfirmDeleteRoom}
+                  className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-extrabold text-xs rounded-xl transition shadow-sm flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isDeletingRoom ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>삭제 중...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3.5 h-3.5 text-white" />
+                      <span>삭제하기</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
