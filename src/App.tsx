@@ -7471,7 +7471,7 @@ export default function App() {
 
                     return (
                       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                        <section className={`${cycle?.status === 'VOTING' ? 'order-1' : 'order-2'} lg:order-1 lg:col-span-8 bg-slate-50 border border-slate-200 rounded-3xl p-4 md:p-5 max-h-[72vh] overflow-y-auto space-y-4`}>
+                        <section className={`${cycle?.status === 'VOTING' ? 'order-1' : 'order-2'} lg:order-1 lg:col-span-8 bg-slate-50 border border-slate-200 rounded-3xl p-4 md:p-5 space-y-4`}>
                           <div className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur border-b border-slate-200 pb-3">
                             <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">전원 제출 후 동시 공개</span>
                             <h2 className="text-xl font-black text-slate-900 mt-1">{resultTitle}</h2>
@@ -7530,8 +7530,8 @@ export default function App() {
                             <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-md space-y-4">
                               <div>
                                 <span className="text-[10px] font-black text-amber-300">최종 후보 확인 완료</span>
-                                <h3 className="text-base font-extrabold mt-1">최종 별 투표 준비</h3>
-                                <p className="text-xs text-slate-300 mt-1 leading-relaxed">방 설정에 따라 최종 투표 참여 인원을 확인한 뒤 방장이 시작합니다.</p>
+                                <h3 className="text-base font-extrabold mt-1">최종 투표 참여자를 확인해주세요</h3>
+                                <p className="text-xs text-slate-300 mt-1 leading-relaxed">기본적으로 기존 참여자가 최종 투표에 참여합니다. 필요하면 투표자를 추가한 뒤 최종 별 투표를 시작하세요.</p>
                               </div>
                               {roomDetails.voterSetup?.enabled ? (
                                 <div className="bg-white/10 rounded-xl p-3 space-y-1 text-xs">
