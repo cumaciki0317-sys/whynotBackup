@@ -6659,7 +6659,7 @@ export default function App() {
                                 평가 대상 {targetIdeas.length}개
                               </span>
                               <span className="bg-slate-50 text-slate-600 border border-slate-200 px-3 py-1.5 rounded-full">
-                                내 아이디어 {myIdeaCount}개는 공정성을 위해 제외
+                                내가 제안한 아이디어는 공정한 평가를 위해 제외됩니다.
                               </span>
                             </div>
                           </div>
@@ -6734,12 +6734,7 @@ export default function App() {
                                         <span className="text-[10px] font-black text-indigo-600">
                                           {isSecondScoreRound ? `1차 통과 후보 #${ideaIndex + 1}` : `익명 후보 #${ideaIndex + 1}`}
                                         </span>
-                                        <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full border ${card?.source === 'AI'
-                                          ? 'bg-indigo-50 text-indigo-700 border-indigo-100'
-                                          : 'bg-slate-50 text-slate-500 border-slate-200'
-                                        }`}>
-                                          {card?.source === 'AI' ? 'AI 표준화 카드' : '원문 기반 카드'}
-                                        </span>
+
                                       </div>
                                       <div>
                                         <h3 className="text-base font-extrabold text-slate-900">{card?.title || idea.title}</h3>
