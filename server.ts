@@ -2714,13 +2714,14 @@ async function aiClusterCriteria(
   const team = roomMeta?.team || '팀 프로젝트 팀원';
   const environment = roomMeta?.environment || '가용 예산 및 인력 리소스 범위 내';
 
-  const prompt = `당신은 다양한 산업과 프로젝트에서 사용되는 평가 기준을 설계하고 구조화하는 평가 체계 설계 전문가이자 데이터 분류 전문가입니다.
+  const prompt = `당신은 의사결정 서비스에서 제안된 기준들을 통합하여 모든 아이디어를 동일한 잣대로 비교할 수 있는 공통 평가 체계를 구축하는 평가 체계 설계 전문가입니다.
 
-입력된 평가 기준 목록을 의미 기반으로 분석하여 다음 작업을 수행하세요:
-1. 의미가 같거나 유사한 평가 기준을 통합합니다.
-2. 하나의 기준에 여러 평가 개념이 섞여 있으면 분리합니다.
-3. 관련성이 높은 평가 기준끼리 의미 기반으로 클러스터링합니다.
-4. 모든 아이디어를 공정하게 평가할 수 있는 핵심 3개~5개 통합 평가 기준을 도출하세요.
+제안된 평가 기준 목록을 의미 기반으로 분석하여 다음 작업을 수행하세요:
+1. 특정 아이디어 하나에만 적용되는 기준보다 등록된 모든 아이디어를 공정하게 비교할 수 있는 '공통 평가 기준'으로 일반화하세요.
+2. 의미가 같거나 유사한 기준은 하나로 통합하세요.
+3. 참여진이 제안하지 않은 새로운 평가 관점을 임의로 추가하거나 왜곡하지 마세요.
+4. 모든 아이디어를 비교·평가할 수 있는 핵심 3개~5개 공통 평가 기준을 도출하세요.
+5. 각 기준은 기준명("name")과 함께 모든 아이디어에 공통 적용할 수 있는 구체적인 평가 질문 및 설명("description")을 작성하세요.
 
 [평가 대상 분야]
 ${category}
@@ -2735,19 +2736,18 @@ ${roomTitle}: ${roomDesc}
 팀 구성: ${team}
 실행 환경: ${environment}
 
-[평가 기준 목록]
+[제안된 평가 기준 목록]
 ${proposalsListText}
 
 ## 작성 지침
-1. 수집된 모든 제안 항목을 빠짐없이 분석하여 중복/유사 기준을 그룹화하고 핵심 3개~5개 기준을 도출하세요.
-2. 각 통합 평가 기준은 15자 이내의 명확한 기준명("name")과 1문장의 구체 설명("description")을 작성하세요.
-3. 마크다운 없이 Pure JSON 배열 포맷으로만 출력하세요.
+1. 수집된 제안 항목들을 분석하여 중복/유사 의미를 통합하고, 모든 아이디어에 공통 적용 가능한 3개~5개 핵심 기준으로 정리하세요.
+2. 각 평가 기준은 15자 이내의 공통 기준명("name")과 1문장의 평가 질문/설명("description")으로 작성하세요.
+3. 마크다운 코드블록 없이 Pure JSON 배열 포맷으로만 출력하세요.
 
 JSON 출력 예시:
 [
-  { "name": "기준명 1", "description": "설명 1" },
-  { "name": "기준명 2", "description": "설명 2" },
-  { "name": "기준명 3", "description": "설명 3" }
+  { "name": "사용자 확보 및 도달 가능성", "description": "해당 아이디어가 잠재 사용자에게 효과적으로 도달하고 관심 사용자를 확보할 가능성이 있는가?" },
+  { "name": "실행 가능성 및 리소스 적정성", "description": "가용 예산, 인력, 기술 스택 범위 내에서 현실적으로 구현 및 운영 가능한가?" }
 ]`;
 
   try {
@@ -8647,6 +8647,99 @@ app.post('/api/rooms/:id/criteria/cluster', async (req: AuthenticatedRequest, re
   room.status = 'CRITERIA_REVIEW';
 
   res.json({ success: true, candidates });
+});
+
+/** Delete a candidate Criterion during CRITERIA_REVIEW (Host only) */
+app.delete('/api/rooms/:id/criteria/:criterionId', async (req: AuthenticatedRequest, res) => {
+  const { id, criterionId } = req.params;
+  const userId = req.auth!.userId;
+
+  const room = await hydrateRoomFromSupabase(id);
+  if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+
+  // 1. 방장 권한 검증
+  if (room.hostId !== userId) {
+    return res.status(403).json({ error: '방장만 평가 기준을 삭제할 수 있습니다.' });
+  }
+
+  // 2. CRITERIA_REVIEW 단계 검증
+  if (room.status !== 'CRITERIA_REVIEW') {
+    return res.status(409).json({ error: '평가 기준 검토 단계에서만 기준을 삭제할 수 있습니다.' });
+  }
+
+  let currentCriteria: Criterion[] = [];
+
+  if (SUPABASE_CONFIGURED) {
+    // Supabase DB를 Source of Truth로 사용
+    const { data: dbCriteria, error: fetchError } = await supabase
+      .from('criteria')
+      .select('id, room_id, name, description, confirmed')
+      .eq('room_id', id);
+
+    if (fetchError) {
+      return res.status(503).json({ error: '평가 기준 목록을 조회하지 못했습니다.' });
+    }
+
+    currentCriteria = (dbCriteria || []).map(c => ({
+      id: String(c.id),
+      roomId: String(c.room_id),
+      name: String(c.name || ''),
+      description: String(c.description || ''),
+      confirmed: Boolean(c.confirmed)
+    }));
+
+    // 3. 대상 criterionId가 현재 room_id에 실제로 속하는지 검증
+    const targetCriterion = currentCriteria.find(c => c.id === criterionId);
+    if (!targetCriterion) {
+      return res.status(404).json({ error: '해당 평가 기준을 찾을 수 없거나 이미 삭제되었습니다.' });
+    }
+
+    // 4. 최소 3개 유지 조건 검증 (3개 이하일 때 409 반환)
+    if (currentCriteria.length <= 3) {
+      return res.status(409).json({ error: '평가를 위해 최소 3개의 공통 기준이 필요합니다.' });
+    }
+
+    // 5. Supabase에서 해당 기준 1개 삭제
+    const { data: deletedRows, error: deleteError } = await supabase
+      .from('criteria')
+      .delete()
+      .eq('id', criterionId)
+      .eq('room_id', id)
+      .select('id');
+
+    if (deleteError) {
+      return res.status(503).json({ error: '평가 기준 삭제를 저장하지 못했습니다.' });
+    }
+    if (!deletedRows || deletedRows.length !== 1) {
+      return res.status(409).json({ error: '평가 기준이 이미 변경되거나 삭제되었습니다. 새로고침해 주세요.' });
+    }
+
+    // 6. 삭제 성공 후 인메모리 Map을 DB의 최신 기준 목록과 동기화
+    const updatedCriteria = currentCriteria.filter(c => c.id !== criterionId);
+    criteria.set(id, updatedCriteria);
+
+    return res.json({ success: true, deletedId: criterionId, remainingCount: updatedCriteria.length });
+  } else {
+    // Offline / fallback 환경
+    if (IS_PRODUCTION) {
+      return res.status(503).json({ error: '평가 기준 저장소를 사용할 수 없습니다.' });
+    }
+
+    currentCriteria = criteria.get(id) || [];
+    const targetCriterion = currentCriteria.find(c => c.id === criterionId);
+    if (!targetCriterion) {
+      return res.status(404).json({ error: '해당 평가 기준을 찾을 수 없거나 이미 삭제되었습니다.' });
+    }
+
+    if (currentCriteria.length <= 3) {
+      return res.status(409).json({ error: '평가를 위해 최소 3개의 공통 기준이 필요합니다.' });
+    }
+
+    const updatedCriteria = currentCriteria.filter(c => c.id !== criterionId);
+    criteria.set(id, updatedCriteria);
+
+    return res.json({ success: true, deletedId: criterionId, remainingCount: updatedCriteria.length });
+  }
 });
 
 /** Confirm the agreed criteria and move the whole room to evaluation. */

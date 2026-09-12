@@ -3184,6 +3184,36 @@ export default function App() {
     }
   };
 
+  const [deletingCriterionId, setDeletingCriterionId] = useState<string | null>(null);
+
+  // Delete Criterion (Host only)
+  const handleDeleteCriterion = async (criterionId: string) => {
+    if (!activeRoomId || !roomDetails || deletingCriterionId) return;
+    const currentList = editableCriteria.length > 0 ? editableCriteria : (roomDetails.criteria || []);
+    if (currentList.length <= 3) {
+      triggerToast('평가를 위해 최소 3개의 공통 기준이 필요합니다.', 'error');
+      return;
+    }
+
+    setDeletingCriterionId(criterionId);
+    try {
+      const res = await apiFetch(`/api/rooms/${activeRoomId}/criteria/${criterionId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || '평가 기준 삭제에 실패했습니다.');
+
+      await fetchRoomDetails(activeRoomId, false);
+      triggerToast('평가 기준이 삭제되었습니다.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '평가 기준 삭제에 실패했습니다.';
+      triggerToast(message, 'error');
+      await fetchRoomDetails(activeRoomId, true);
+    } finally {
+      setDeletingCriterionId(null);
+    }
+  };
+
   // Confirm Criteria (Host only)
   const handleConfirmCriteria = async () => {
     if (!activeRoomId || !roomDetails || isConfirmingCriteria) return;
@@ -6285,10 +6315,13 @@ export default function App() {
                           <div className="bg-slate-900 text-white p-5 md:p-6 rounded-2xl space-y-4 shadow-md">
                             <h3 className="text-sm font-bold flex items-center gap-1.5 text-amber-400">
                               <Sparkles className="w-4 h-4 text-amber-400" />
-                              다음 단계로: AI 기준 자동 정리 (CRIT-02)
+                              AI로 공통 평가 기준 정리
                             </h3>
                             <p className="text-xs text-slate-300 leading-relaxed">
-                              참여진들의 기준 제안이 완료되었다면 아래 버튼을 누르십시오. Potens AI가 제안된 기준들을 통합 분류 및 클러스터링하여 **핵심 3~5개 평가 기준 리스트**로 자동 정리합니다.
+                              모든 참여자의 기준 제안이 완료되면, AI가 익명으로 제출된 기준의 중복·유사 의미를 분석하고 통합하여 모든 아이디어를 동일하게 비교할 수 있는 3~5개의 공통 평가 기준으로 정리합니다.
+                            </p>
+                            <p className="text-[11px] text-amber-300/90 bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60 leading-relaxed">
+                              💡 AI는 평가 기준을 대신 결정하지 않습니다. 팀의 제안을 구조화하여 최종 기준을 선택할 수 있도록 돕습니다.
                             </p>
                             <button
                               onClick={handleTriggerClustering}
@@ -6298,12 +6331,12 @@ export default function App() {
                               {isClusteringLoading ? (
                                 <>
                                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                  AI 자동 정리 진행 중...
+                                  공통 평가 기준 정리 중...
                                 </>
                               ) : (
                                 <>
                                   <Sparkles className="w-3.5 h-3.5" />
-                                  다음 단계로 (AI 자동 정리 개시)
+                                  AI로 평가 기준 정리하기
                                   <ArrowRight className="w-3.5 h-3.5" />
                                 </>
                               )}
@@ -6313,6 +6346,19 @@ export default function App() {
                                 모든 참여자가 제안을 완료하면 익명 제안이 동시에 공개되고 AI 정리를 시작할 수 있습니다.
                               </p>
                             )}
+                          </div>
+                        )}
+
+                        {/* Non-host Waiting Banner when all proposals are revealed */}
+                        {roomDetails.room.hostId !== userId && roomDetails.criteriaProposalsRevealed && (
+                          <div className="bg-indigo-50 border border-indigo-200 text-indigo-950 p-5 rounded-2xl space-y-2 shadow-xs">
+                            <div className="flex items-center gap-2 text-indigo-900 font-extrabold text-xs">
+                              <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+                              <span>모든 참여자의 기준 제안이 완료됐어요! 🎉</span>
+                            </div>
+                            <p className="text-xs text-indigo-800 leading-relaxed">
+                              익명으로 제출된 평가 기준이 공개되었습니다. 방장이 AI 공통 평가 기준 정리를 시작하면 정리 결과를 함께 확인할 수 있습니다.
+                            </p>
                           </div>
                         )}
                       </div>
@@ -6325,61 +6371,96 @@ export default function App() {
                   {roomDetails.room.status === 'CRITERIA_REVIEW' && (
                     <div className="space-y-6">
                       <div className="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                        <div className="border-b border-slate-100 pb-2">
+                        <div className="border-b border-slate-100 pb-2 space-y-1">
                           <h2 className="text-base font-extrabold text-slate-900 flex items-center gap-1.5">
                             <Sparkles className="w-4 h-4 text-amber-500" />
-                            총 취합된 핵심 평가 기준 목록 확인
+                            AI가 정리한 공통 평가 기준 확인 및 확정
                           </h2>
-                          <p className="text-xs text-slate-500 mt-0.5">
-                            참여진의 익명 제안을 바탕으로 AI가 정리한 핵심 평가 기준입니다. 기준을 확정하면 모든 아이디어의 표준화 평가 카드가 한 번에 생성됩니다.
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            AI가 팀의 제안을 바탕으로 공통 평가 기준을 정리했어요. 유사한 기준은 통합하고, 모든 아이디어에 공통 적용할 수 있도록 정리했습니다.
                           </p>
                         </div>
 
-                        <div className="space-y-4">
-                          {(editableCriteria.length > 0 ? editableCriteria : (roomDetails?.criteria || [])).map((crit, idx) => (
-                            <div key={crit.id || `crit-${idx}`} className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
-                              <div className="flex items-center justify-between gap-4">
-                                <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100 uppercase tracking-wider">
-                                  기준 #{idx + 1}
-                                </span>
-                              </div>
+                        {(() => {
+                          const displayCriteria = editableCriteria.length > 0 ? editableCriteria : (roomDetails?.criteria || []);
+                          const isHost = roomDetails.room.hostId === userId;
+                          const canDelete = isHost && displayCriteria.length > 3;
 
-                              <div>
-                                <h4 className="text-sm font-bold text-slate-900">{crit.name}</h4>
-                                <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">{crit.description}</p>
-                              </div>
+                          return (
+                            <div className="space-y-4">
+                              {displayCriteria.map((crit, idx) => (
+                                <div key={crit.id || `crit-${idx}`} className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-1 relative group">
+                                  <div className="flex items-center justify-between gap-4">
+                                    <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100 uppercase tracking-wider">
+                                      공통 평가 기준 #{idx + 1}
+                                    </span>
+
+                                    {/* 방장 화면의 각 공통 평가 기준 카드에만 삭제 버튼 노출 */}
+                                    {isHost && (
+                                      <div className="flex items-center gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteCriterion(crit.id)}
+                                          disabled={!canDelete || deletingCriterionId === crit.id}
+                                          title={displayCriteria.length <= 3 ? "평가를 위해 최소 3개의 공통 기준이 필요합니다." : "이 평가 기준 삭제"}
+                                          className="p-1.5 text-slate-400 hover:text-red-600 disabled:opacity-40 disabled:hover:text-slate-400 disabled:cursor-not-allowed rounded-lg hover:bg-red-50 transition cursor-pointer flex items-center gap-1 text-xs font-semibold"
+                                        >
+                                          {deletingCriterionId === crit.id ? (
+                                            <RefreshCw className="w-4 h-4 animate-spin text-red-500" />
+                                          ) : (
+                                            <Trash2 className="w-4 h-4" />
+                                          )}
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div>
+                                    <h4 className="text-sm font-bold text-slate-900">{crit.name}</h4>
+                                    <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">{crit.description}</p>
+                                  </div>
+                                </div>
+                              ))}
+
+                              {/* 3개가 된 상태에서 추가 삭제 불가 안내 */}
+                              {isHost && displayCriteria.length <= 3 && (
+                                <div className="p-3 bg-amber-50/80 border border-amber-200/60 rounded-xl flex items-center gap-2 text-amber-800 text-xs font-medium">
+                                  <Info className="w-4 h-4 text-amber-600 shrink-0" />
+                                  <span>평가를 위해 최소 3개의 공통 기준이 필요합니다.</span>
+                                </div>
+                              )}
                             </div>
-                          ))}
-                        </div>
+                          );
+                        })()}
 
                         <div className="pt-4 border-t border-slate-100 space-y-3">
                           {roomDetails.room.hostId === userId ? (
                             <div className="flex items-center justify-between gap-3">
                               <p className="text-xs text-slate-500">
-                                기준을 확인한 뒤 다음 단계를 시작해 주세요. 모든 참여자가 함께 이동합니다.
+                                정리된 평가 기준을 최종 검토한 후 아래 버튼을 눌러 평가 단계로 진입하세요.
                               </p>
                               <button
                                 type="button"
                                 onClick={handleConfirmCriteria}
                                 disabled={isConfirmingCriteria}
-                                className="px-5 py-2.5 bg-amber-400 text-slate-950 hover:bg-amber-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-xs font-black transition shadow-sm flex items-center gap-1.5 shrink-0"
+                                className="px-5 py-2.5 bg-amber-400 text-slate-950 hover:bg-amber-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-xs font-black transition shadow-sm flex items-center gap-1.5 shrink-0 cursor-pointer"
                               >
                                 {isConfirmingCriteria ? (
                                   <>
                                     <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                    평가 단계 준비 중...
+                                    평가 기준 확정 중...
                                   </>
                                 ) : (
                                   <>
                                     <Check className="w-3.5 h-3.5" />
-                                    다음 단계로 진행
+                                    평가 기준 확정하고 다음 단계로
                                   </>
                                 )}
                               </button>
                             </div>
                           ) : (
                             <p className="text-xs font-bold text-slate-500 text-center py-2">
-                              기준 정리가 완료되었습니다. 방장이 다음 단계를 시작하기를 기다리고 있습니다.
+                              방장이 최종 평가 기준을 확인하고 있습니다. 확정되면 자동으로 다음 단계로 이동합니다.
                             </p>
                           )}
                         </div>
