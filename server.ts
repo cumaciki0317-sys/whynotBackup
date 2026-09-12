@@ -589,7 +589,7 @@ async function callPotensAI(
 
   const data = await response.json();
   // Standard chat completion response resolution
-  return data.text || data.message || data.content || (data.choices && data.choices[0]?.message?.content) || JSON.stringify(data);
+  return data.result?.response || data.response || data.text || data.message || data.content || (data.choices && data.choices[0]?.message?.content) || JSON.stringify(data);
 }
 
 let aiClient: GoogleGenAI | null = null;
@@ -8027,95 +8027,7 @@ app.post('/api/rooms/:id/screening/finalize', async (req: AuthenticatedRequest, 
   }
 });
 
-/**
- * AI Idea Development Helper Endpoint (IA 2.2: AI 아이디어 디벨롭 보조 기능)
- */
-app.post('/api/rooms/:id/ideas/develop', async (req, res) => {
-  const { title, description } = req.body;
-  if (typeof title !== 'string' || typeof description !== 'string' || !title.trim() || !description.trim()) {
-    return res.status(400).json({ error: '제목과 설명을 모두 입력해주세요.' });
-  }
-  if (title.length > 120 || description.length > 10000) {
-    return res.status(400).json({ error: 'AI 보완 요청의 길이가 너무 깁니다.' });
-  }
 
-  const ai = getGeminiClient();
-  if (!ai) {
-    return res.json({
-      originalDescription: description,
-      revisedDescription: description,
-      enhancedDescription: description,
-      reviewQuestions: [
-        '이 의견이 해결하려는 사용자의 문제는 무엇인가요?',
-        '기간·인력·예산 중 반드시 확인해야 할 제약은 무엇인가요?',
-        '성공 여부를 어떤 결과로 확인할 수 있나요?'
-      ],
-      aiAvailable: false
-    });
-  }
-
-  try {
-    const prompt = `
-당신은 팀 의사결정 서비스의 중립적인 문장 통역자입니다.
-당신은 심판이 아니며 아이디어의 우열, 가능성, 점수, 채택 여부를 판단해서는 안 됩니다.
-작성자가 말하고자 한 의미와 사실을 추가·삭제·과장하지 않은 채 다음 일만 수행하세요.
-1. 서툰 표현을 이해하기 쉬운 문장으로 정리합니다.
-2. 감정적이거나 단정적인 표현을 중립적으로 바꿉니다.
-3. 원문에 없는 수치, 효과, 일정, 기술 또는 시장 사실을 만들지 않습니다.
-4. 작성자가 스스로 보완할 수 있는 검토 질문을 최대 3개 제안합니다.
-
-[원문 제목]
-${title}
-
-[원문 내용]
-${description}
-
-반드시 아래 JSON만 출력하세요.
-{
-  "revisedDescription": "원문의 의미를 보존한 중립적 정리문",
-  "reviewQuestions": ["검토 질문 1", "검토 질문 2", "검토 질문 3"]
-}
-`;
-
-    const response = await withTimeout(ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-    }), AI_PROVIDER_TIMEOUT_MS, 'Gemini AI 응답 시간이 초과되었습니다.');
-
-    const raw = (response.text || '').replace(/```json|```/g, '').trim();
-    let revisedDescription = description;
-    let reviewQuestions: string[] = [];
-    try {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed.revisedDescription === 'string' && parsed.revisedDescription.trim()) {
-        revisedDescription = parsed.revisedDescription.trim();
-      }
-      if (Array.isArray(parsed.reviewQuestions)) {
-        reviewQuestions = parsed.reviewQuestions
-          .filter((question: unknown) => typeof question === 'string')
-          .slice(0, 3);
-      }
-    } catch {
-      // Invalid model output must never overwrite the author's text.
-    }
-    res.json({
-      originalDescription: description,
-      revisedDescription,
-      enhancedDescription: revisedDescription,
-      reviewQuestions,
-      aiAvailable: true
-    });
-  } catch (err) {
-    console.error('AI idea development failed:', err);
-    res.json({
-      originalDescription: description,
-      revisedDescription: description,
-      enhancedDescription: description,
-      reviewQuestions: [],
-      aiAvailable: false
-    });
-  }
-});
 
 /**
  * 6-1. AI Suggest 3 Criteria Based on Registered Ideas (Gemini AI)

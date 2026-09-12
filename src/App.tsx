@@ -533,13 +533,7 @@ export default function App() {
   const [ideaPdfName, setIdeaPdfName] = useState('');
   const [ideaPdfFile, setIdeaPdfFile] = useState<File | null>(null);
   const [ideaTags, setIdeaTags] = useState('');
-  const [isDevelopingIdea, setIsDevelopingIdea] = useState(false);
-  const [ideaAiSuggestion, setIdeaAiSuggestion] = useState<null | {
-    originalDescription: string;
-    revisedDescription: string;
-    reviewQuestions: string[];
-    aiAvailable: boolean;
-  }>(null);
+
 
   // Expanded Ideas state for accordion toggle
   const [expandedIdeaIds, setExpandedIdeaIds] = useState<Record<string, boolean>>({});
@@ -3132,34 +3126,7 @@ export default function App() {
     await handleDeleteProposalDirect(targetId);
   };
 
-  const handleDevelopIdea = async () => {
-    if (!activeRoomId || !ideaTitle.trim() || !ideaDesc.trim()) {
-      triggerToast('제목과 내용을 먼저 입력해 주세요.', 'error');
-      return;
-    }
-    setIsDevelopingIdea(true);
-    try {
-      const res = await apiFetch(`/api/rooms/${activeRoomId}/ideas/develop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: ideaTitle, description: ideaDesc })
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.error || 'AI 보완안을 만들지 못했습니다.');
-      const newDesc = data.revisedDescription || data.enhancedDescription || ideaDesc;
-      if (newDesc && newDesc.trim() !== ideaDesc.trim()) {
-        setIdeaDesc(newDesc);
-        triggerToast('✨ AI 표현 보완 내용이 본문에 자동 적용되었습니다!');
-      } else {
-        triggerToast('이미 문맥이 깔끔하게 정리되어 원문이 유지되었습니다.');
-      }
-      setIdeaAiSuggestion(null);
-    } catch (error) {
-      triggerToast(error instanceof Error ? error.message : 'AI 보완안을 만들지 못했습니다.', 'error');
-    } finally {
-      setIsDevelopingIdea(false);
-    }
-  };
+
 
   const handleCompleteCriteriaProposal = async () => {
     if (!activeRoomId) return;
@@ -5929,19 +5896,8 @@ export default function App() {
                               />
                             </div>
 
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
+                              <div className="space-y-1">
                                 <label className="text-xs font-bold text-slate-700">아이디어 상세 설명 <span className="text-rose-500">*</span></label>
-                                <button
-                                  type="button"
-                                  onClick={handleDevelopIdea}
-                                  disabled={isDevelopingIdea}
-                                  className="text-[11px] font-bold text-indigo-600 hover:text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-0.5 rounded-full flex items-center gap-1 transition"
-                                >
-                                  <Sparkles className={`w-3 h-3 text-indigo-500 ${isDevelopingIdea ? 'animate-spin' : ''}`} />
-                                  {isDevelopingIdea ? 'AI 정리 중' : 'AI 표현 보완'}
-                                </button>
-                              </div>
                               <textarea
                                 required
                                 value={ideaDesc}
@@ -5953,59 +5909,7 @@ export default function App() {
                               <p className="text-[11px] text-slate-500 leading-relaxed">
                                 AI가 더 적합한 평가 기준을 제안할 수 있도록 핵심 내용·대상·실행 방식을 구체적으로 작성해 주세요. 최소 글자 수는 강제하지 않습니다.
                               </p>
-                              {ideaAiSuggestion && (
-                                <div className="mt-3 p-4 rounded-xl border border-indigo-200 bg-indigo-50/40 space-y-3">
-                                  <div>
-                                    <p className="text-xs font-extrabold text-slate-900">원문과 AI 표현 보완안 비교</p>
-                                    <p className="text-[11px] text-slate-500 mt-0.5">
-                                      AI는 판단하지 않고 표현만 정리합니다. 아래 보완안은 승인하기 전까지 원문에 반영되지 않습니다.
-                                    </p>
-                                  </div>
-                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <div className="bg-white p-3 rounded-lg border border-slate-200">
-                                      <span className="text-[10px] font-black text-slate-500">내 원문</span>
-                                      <p className="text-xs text-slate-700 whitespace-pre-line mt-1">{ideaAiSuggestion.originalDescription}</p>
-                                    </div>
-                                    <div className="bg-white p-3 rounded-lg border border-indigo-200">
-                                      <span className="text-[10px] font-black text-indigo-600">AI 표현 보완안</span>
-                                      <p className="text-xs text-slate-700 whitespace-pre-line mt-1">{ideaAiSuggestion.revisedDescription}</p>
-                                    </div>
-                                  </div>
-                                  {ideaAiSuggestion.reviewQuestions.length > 0 && (
-                                    <div className="bg-white p-3 rounded-lg border border-amber-200">
-                                      <p className="text-[10px] font-black text-amber-700">주장을 보완하기 위한 검토 질문</p>
-                                      <ul className="mt-1 space-y-1">
-                                        {ideaAiSuggestion.reviewQuestions.map((question, index) => (
-                                          <li key={`${question}-${index}`} className="text-xs text-slate-700">
-                                            {index + 1}. {question}
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                  )}
-                                  <div className="flex justify-end gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => setIdeaAiSuggestion(null)}
-                                      className="px-3 py-2 text-xs font-bold text-slate-600 bg-white border border-slate-200 rounded-lg"
-                                    >
-                                      원문 유지
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setIdeaDesc(ideaAiSuggestion.revisedDescription);
-                                        setIdeaAiSuggestion(null);
-                                        triggerToast('작성자가 승인한 AI 보완안을 적용했습니다.');
-                                      }}
-                                      className="px-3 py-2 text-xs font-bold text-white bg-indigo-600 rounded-lg"
-                                    >
-                                      승인하고 적용
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
+                              </div>
 
                             <div className="space-y-1">
                               <label className="text-xs font-bold text-slate-700">참고 링크 (선택)</label>
