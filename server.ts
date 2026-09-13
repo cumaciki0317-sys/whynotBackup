@@ -3530,10 +3530,104 @@ ${reasons.map(r => `- ${r}`).join('\n')}
 interface DecisionReportEvidence {
   roomTitle: string;
   winnerIdeas: string[];
+  winnerDescriptions: string[];
   selectedReasons: string[];
   majorConcerns: string[];
   unverifiedAssumptions: string[];
   nextValidationTasks: string[];
+}
+
+type SuggestedActionItem = NonNullable<DecisionReport['suggestedActionItems']>[number];
+
+function buildDeterministicActionItems(evidence: DecisionReportEvidence): SuggestedActionItem[] {
+  const winnerName = evidence.winnerIdeas[0] || '최종 선정안';
+  return [
+    {
+      title: `${winnerName} 실행 범위와 핵심 타깃 정의`,
+      completionCriteria: '목표 사용자, 핵심 메시지와 실행 범위를 문서로 정리합니다.'
+    },
+    {
+      title: `${winnerName} 최소 실행안 제작 및 운영 준비`,
+      completionCriteria: '작은 범위에서 실행 가능한 첫 결과물을 준비하고 운영 방법을 확인합니다.'
+    },
+    {
+      title: '서비스 전환 경로 구성',
+      completionCriteria: '관심 사용자가 서비스 소개, 문의 또는 신청 단계로 이동할 수 있는 경로를 연결합니다.'
+    },
+    {
+      title: '성과 측정 및 후속 검토',
+      completionCriteria: '핵심 측정 지표를 정하고 실행 결과를 바탕으로 지속, 수정 또는 중단 여부를 검토합니다.'
+    }
+  ];
+}
+
+function parseSuggestedActionItems(rawText: string): SuggestedActionItem[] | null {
+  try {
+    const jsonText = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const parsed = JSON.parse(jsonText);
+    if (!Array.isArray(parsed)) return null;
+    const items = parsed
+      .map(item => ({
+        title: typeof item?.title === 'string' ? item.title.trim() : '',
+        completionCriteria: typeof item?.completionCriteria === 'string' ? item.completionCriteria.trim() : ''
+      }))
+      .filter(item => item.title && item.completionCriteria)
+      .slice(0, 7);
+    return items.length >= 3 ? items : null;
+  } catch {
+    return null;
+  }
+}
+
+async function aiGenerateSuggestedActionItems(evidence: DecisionReportEvidence): Promise<SuggestedActionItem[]> {
+  const fallback = buildDeterministicActionItems(evidence);
+  const prompt = `
+# 역할
+당신은 최종 선정 아이디어를 실제 업무로 연결하는 실행계획 작성 지원자입니다.
+아래 선정안, 우려와 미확인 가정에 직접 대응하는 구체적인 실행 과제 4~7개를 제안하세요.
+과제를 이미 합의된 업무처럼 표현하지 말고, 논의를 위한 제안으로 작성하세요.
+담당자, 날짜, 예산, 성과 수치를 임의로 만들지 마세요.
+
+# 회의
+- 주제: ${evidence.roomTitle}
+- 최종 선정안: ${evidence.winnerIdeas.join(', ')}
+- 선정안 설명: ${evidence.winnerDescriptions.join(' / ') || '설명 없음'}
+
+# 주요 우려
+${evidence.majorConcerns.map(item => `- ${item}`).join('\n') || '- 확인된 우려 없음'}
+
+# 미확인 가정 및 검증 과제
+${[...evidence.unverifiedAssumptions, ...evidence.nextValidationTasks].map(item => `- ${item}`).join('\n') || '- 별도 입력 없음'}
+
+# 출력 규칙
+설명이나 마크다운 없이 JSON 배열만 출력하세요.
+각 항목은 다음 두 문자열 필드만 사용하세요.
+[{"title":"구체적인 실행 과제","completionCriteria":"완료 여부를 확인할 수 있는 기준"}]
+`;
+
+  let rawText = '';
+  if (process.env.POTENS_API_KEY) {
+    try {
+      rawText = await callPotensAI(prompt, 'gemini-2.5-flash');
+    } catch (error) {
+      console.info('[AI Provider] Suggested action items fallback to Gemini SDK:', error);
+    }
+  }
+  if (!rawText) {
+    const ai = getGeminiClient();
+    if (ai) {
+      try {
+        const response = await withTimeout(ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: prompt
+        }), AI_PROVIDER_TIMEOUT_MS, 'Gemini AI 실행 과제 생성 시간이 초과되었습니다.');
+        rawText = response.text || '';
+      } catch (error) {
+        console.error('Gemini AI suggested action items failed:', error);
+      }
+    }
+  }
+  return parseSuggestedActionItems(rawText) || fallback;
 }
 
 function renderDeterministicDecisionReport(evidence: DecisionReportEvidence): string {
@@ -11106,6 +11200,7 @@ async function generateFinalRoomReport(
         majorConcerns: resultSnapshot.majorConcerns || [],
         unverifiedAssumptions: resultSnapshot.unverifiedAssumptions || [],
         nextValidationTasks: resultSnapshot.nextValidationTasks || [],
+        suggestedActionItems: resultSnapshot.suggestedActionItems || undefined,
         modelName: existing.model_name || 'unknown',
         promptVersion: existing.prompt_version || 'unknown',
         generatedAt: existing.created_at || new Date().toISOString()
@@ -11126,7 +11221,10 @@ async function generateFinalRoomReport(
       ? allEvaluations.filter(evaluation => !evaluation.roundId || evaluation.roundId === currentRound.id)
       : allEvaluations;
   const roomCriteria = criteria.get(id) || [];
-  const roomStarVotes = starVotesMap.get(id) || new Map<string, string[]>();
+  const persistedFinalVote = Number(room.engineVersion || 1) >= 7
+    ? await loadFinalVoteCycleState(room, room.hostId)
+    : null;
+  const roomStarVotes = persistedFinalVote?.ballots || starVotesMap.get(id) || new Map<string, string[]>();
   const voteCounts: Record<string, number> = Object.fromEntries(roomIdeas.map(idea => [idea.id, 0]));
   roomStarVotes.forEach(selectedIdeaIds => {
     selectedIdeaIds.forEach(ideaId => {
@@ -11202,12 +11300,16 @@ async function generateFinalRoomReport(
   const evidence: DecisionReportEvidence = {
     roomTitle: room.title,
     winnerIdeas: winnerIdeas.length > 0 ? winnerIdeas.map(idea => idea.title) : ['확정되지 않음'],
+    winnerDescriptions: winnerIdeas.map(idea => idea.description).filter(Boolean),
     selectedReasons,
     majorConcerns,
     unverifiedAssumptions,
     nextValidationTasks
   };
-  const reportText = await aiGenerateFinalSummary(evidence);
+  const [reportText, suggestedActionItems] = await Promise.all([
+    aiGenerateFinalSummary(evidence),
+    aiGenerateSuggestedActionItems(evidence)
+  ]);
   const generatedAt = new Date().toISOString();
   const report: DecisionReport = {
     reportText,
@@ -11215,12 +11317,13 @@ async function generateFinalRoomReport(
     majorConcerns,
     unverifiedAssumptions,
     nextValidationTasks,
+    suggestedActionItems,
     modelName: process.env.POTENS_API_KEY
       ? 'potens:gemini-2.5-flash'
       : getGeminiClient()
         ? 'google:gemini-2.5-flash'
         : 'local-deterministic',
-    promptVersion: 'decision-report-v3.0',
+    promptVersion: 'decision-report-v3.1',
     generatedAt
   };
 
@@ -11241,7 +11344,8 @@ async function generateFinalRoomReport(
         selectedReasons,
         majorConcerns,
         unverifiedAssumptions,
-        nextValidationTasks
+        nextValidationTasks,
+        suggestedActionItems
       },
       model_name: report.modelName,
       prompt_version: report.promptVersion,

@@ -178,6 +178,10 @@ export interface DecisionReport {
   majorConcerns: string[];
   unverifiedAssumptions: string[];
   nextValidationTasks: string[];
+  suggestedActionItems?: Array<{
+    title: string;
+    completionCriteria: string;
+  }>;
   modelName: string;
   promptVersion: string;
   generatedAt: string;

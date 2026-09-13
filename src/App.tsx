@@ -3759,11 +3759,134 @@ export default function App() {
     }).slice(0, 3);
   }, [roomDetails]);
 
-  // Download Final Report PDF handler (uses native clean print dialog)
+  const meetingMinutes = useMemo(() => {
+    if (!roomDetails || roomDetails.room.status !== 'CLOSED') return null;
+
+    const room = roomDetails.room;
+    const allIdeas = (roomDetails.ideas || []).filter(Boolean);
+    const winners = allIdeas.filter(idea => idea.status === 'WINNER');
+    const participants = (roomDetails.participants || []).filter(participant => participant.role !== 'VOTER');
+    const participantNames = participants.map(participant => participant.nickname).filter(Boolean);
+    const hostName = participants.find(participant => participant.userId === room.hostId)?.nickname || '방장';
+    const externalVoterCount = Math.max(
+      (roomDetails.participants || []).filter(participant => participant.role === 'VOTER').length,
+      roomDetails.voterSetup?.activeCount || 0
+    );
+    const completedScoreRound = [...(roomDetails.scoreRounds || [])]
+      .reverse()
+      .find(round => round.completed);
+    const scoreForIdea = (ideaId: string) => {
+      const scoreStat = completedScoreRound?.scoreStats?.[ideaId];
+      if (scoreStat) return scoreStat.totalScore;
+      return roomDetails.aggregatedScores?.[ideaId]?.score;
+    };
+    const candidateRows = [...allIdeas].sort((a, b) => {
+      if (a.status === 'WINNER' && b.status !== 'WINNER') return -1;
+      if (b.status === 'WINNER' && a.status !== 'WINNER') return 1;
+      const voteDifference = (roomDetails.starVotes?.[b.id] || 0) - (roomDetails.starVotes?.[a.id] || 0);
+      if (voteDifference !== 0) return voteDifference;
+      return (scoreForIdea(b.id) || 0) - (scoreForIdea(a.id) || 0);
+    });
+    const totalStars = Object.values(roomDetails.starVotes || {}).reduce<number>((sum, count) => sum + Number(count || 0), 0);
+    const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric'
+    });
+    const startDate = new Date(room.createdAt);
+    const endCandidates = [
+      roomDetails.decisionReport?.generatedAt,
+      ...(roomDetails.decisionRounds || []).map(round => round.completedAt || round.startedAt)
+    ].filter((value): value is string => Boolean(value));
+    const endDate = endCandidates.length > 0
+      ? new Date(Math.max(...endCandidates.map(value => new Date(value).getTime()).filter(Number.isFinite)))
+      : startDate;
+    const decisionPeriod = Number.isFinite(startDate.getTime())
+      ? `${dateFormatter.format(startDate)} ~ ${dateFormatter.format(Number.isFinite(endDate.getTime()) ? endDate : startDate)}`
+      : '기록된 기간 없음';
+    const winnerNames = winners.map(idea => idea.title).join(', ') || '선정 결과 확인 필요';
+    const candidateScoreSummary = candidateRows
+      .map(idea => {
+        const score = scoreForIdea(idea.id);
+        return score === undefined ? null : `${idea.title} ${Number(score).toLocaleString('ko-KR')}점`;
+      })
+      .filter(Boolean)
+      .join(', ');
+    const candidateVoteSummary = candidateRows
+      .map(idea => `${idea.title} ${roomDetails.starVotes?.[idea.id] || 0}표`)
+      .join(', ');
+    const selectedReasons = winners.map(winner => {
+      const voteCount = roomDetails.starVotes?.[winner.id] || 0;
+      return `${winner.title}은(는) 최종 익명 누적 투표에서 ${voteCount}표를 받아 최종 선정되었습니다.`;
+    });
+    const report = roomDetails.decisionReport;
+    const fallbackActionItems = winners.length > 0 ? [
+      {
+        title: `${winners[0].title} 실행 범위와 핵심 타깃 정의`,
+        completionCriteria: '목표 사용자, 핵심 메시지와 실행 범위를 문서로 정리합니다.'
+      },
+      {
+        title: `${winners[0].title} 최소 실행안 제작 및 운영 준비`,
+        completionCriteria: '작은 범위에서 실행 가능한 첫 결과물을 준비하고 운영 방법을 확인합니다.'
+      },
+      {
+        title: '서비스 전환 경로 구성',
+        completionCriteria: '관심 사용자가 서비스 소개, 문의 또는 신청 단계로 이동할 수 있는 경로를 연결합니다.'
+      },
+      {
+        title: '성과 측정 및 후속 검토',
+        completionCriteria: '핵심 측정 지표를 정하고 실행 결과를 바탕으로 지속, 수정 또는 중단 여부를 검토합니다.'
+      }
+    ] : [];
+    const actionItems = report?.suggestedActionItems?.length
+      ? report.suggestedActionItems
+      : fallbackActionItems;
+    const decisionSteps = room.decisionMode === 'QUICK'
+      ? [
+          ['1단계 선택지', `${participantNames.length || roomDetails.participantCount || 0}명 참여`, '참여자가 선택지를 등록했습니다.', `후보 ${allIdeas.length}개 등록`],
+          ['2단계 익명투표', `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, '다른 사람의 선택을 보지 않고 별을 배정했습니다.', candidateVoteSummary || '투표 결과 없음'],
+          ['3단계 최종결과', '전원 제출 후 공개', '서버가 최종 결과를 확정했습니다.', `${winnerNames} 선정`]
+        ]
+      : [
+          ['1단계 아이디어', `${participantNames.length || roomDetails.participantCount || 0}명 참여`, '참여자가 익명으로 아이디어를 제안했습니다.', `후보 ${allIdeas.length}개 등록`],
+          ['2단계 기준설정', `${roomDetails.criteriaApproval?.approveCount || participantNames.length || 0}/${roomDetails.criteriaApproval?.eligibleCount || participantNames.length || 0}명 승인`, '제안된 기준을 검토하고 공통 평가 기준을 확정했습니다.', `평가 기준 ${(roomDetails.criteria || []).filter(criterion => criterion.confirmed).length}개 확정`],
+          ['3단계 점수·피드백', `${roomDetails.evaluationSubmittedCount || roomDetails.evaluatorsCount || 0}/${roomDetails.evaluationExpectedCount || participantNames.length || 0}명 완료`, '자기 아이디어를 제외하고 익명 평가했습니다.', candidateScoreSummary || '점수 평가 완료'],
+          ['4단계 최종 별투표', `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, '참여자별 별 3개를 익명으로 배정했습니다.', candidateVoteSummary || '투표 결과 없음'],
+          ['5단계 최종결과', '전원 제출 후 공개', '평가와 최종 투표 결과를 확정했습니다.', `${winnerNames} 선정`]
+        ];
+
+    return {
+      room,
+      winners,
+      candidateRows,
+      participantNames,
+      hostName,
+      externalVoterCount,
+      scoreForIdea,
+      totalStars,
+      decisionPeriod,
+      winnerNames,
+      candidateVoteSummary,
+      selectedReasons,
+      majorConcerns: report?.majorConcerns || [],
+      unverifiedAssumptions: report?.unverifiedAssumptions || [],
+      validationTasks: report?.nextValidationTasks || [],
+      actionItems,
+      decisionSteps
+    };
+  }, [roomDetails]);
+
+  // The browser print dialog now receives an A4-only meeting-minutes layout.
   const handleDownloadPDF = () => {
-    triggerToast('📄 최종 결과 리포트 PDF 인쇄/다운로드 창을 불러옵니다.');
+    const previousTitle = document.title;
+    const safeRoomTitle = (roomDetails?.room.title || '의사결정회의록').replace(/[\\/:*?"<>|]/g, ' ').trim();
+    document.title = `WhyNot_의사결정회의록_${safeRoomTitle}`;
+    const restoreTitle = () => { document.title = previousTitle; };
+    window.addEventListener('afterprint', restoreTitle, { once: true });
+    triggerToast('📄 의사결정 회의록 PDF 저장 창을 불러옵니다.');
     setTimeout(() => {
       window.print();
+      window.setTimeout(restoreTitle, 1000);
     }, 500);
   };
 
@@ -8297,309 +8420,205 @@ export default function App() {
                     VIEW 6: CLOSED (FINAL REPORT SHOWCASE - UX IMPROVED)
                     ----------------------------------------------------------- */}
                   {roomDetails.room.status === 'CLOSED' && (
-                    <div className="space-y-6 max-w-4xl mx-auto text-left">
-
-                      {/* ① 최종 결과 헤더 & PDF 저장 버튼 */}
-                      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-6 md:p-8 rounded-3xl text-white shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border border-slate-800">
-                        <div className="space-y-1.5">
-                          <span className="text-[10px] font-black text-amber-400 uppercase tracking-widest bg-amber-500/10 border border-amber-400/30 px-2.5 py-0.5 rounded-full">
-                            최종 결과 보고서
-                          </span>
-                          <h1 className="text-xl md:text-2xl font-black tracking-tight text-white">
-                            {roomDetails.room.title}
-                          </h1>
-                          <p className="text-xs text-slate-300 font-medium">
-                            {roomDetails.room.decisionMode === 'QUICK'
-                              ? '다른 사람의 선택을 보지 않고 진행한 익명 투표와 최종 결정 근거입니다.'
-                              : '익명 아이디어 제안, 공통 기준 평가 및 최종 익명 투표를 종합한 결과입니다.'}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={handleDownloadPDF}
-                          className="px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl text-xs font-black transition shadow-md flex items-center gap-2 cursor-pointer shrink-0 border border-amber-500 active:scale-95"
-                        >
-                          <Download className="w-4 h-4 text-slate-950" />
-                          <span>최종 결과 리포트 PDF 저장</span>
-                        </button>
-                      </div>
-
-                      {/* ② 동률 여부 확인 & 룰렛 섹션 (운영 정책: 동률 발생 시만 표시) */}
-                      {roomDetails.starVoteStatus === 'tie_pending' && (
-                        <div className="bg-amber-50 border-2 border-amber-400 p-6 rounded-3xl text-center space-y-4 shadow-md">
-                          <div className="inline-flex items-center gap-1.5 bg-amber-200 text-amber-950 font-black text-xs px-3.5 py-1 rounded-full border border-amber-300">
-                            <AlertCircle className="w-4 h-4 text-amber-800" />
-                            <span>⚠️ 최종 후보가 동률입니다</span>
-                          </div>
-                          <p className="text-xs text-amber-900 font-bold max-w-lg mx-auto">
-                            최종 채택 경계에서 동점이 발생했습니다. 운명의 룰렛을 돌려 우승 아이디어를 확정해주십시오!
-                          </p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setRoulettePurpose('TIE_RESOLUTION');
-                              setRouletteWinnerResult(null);
-                              setShowRouletteModal(true);
-                            }}
-                            disabled={isSpinningRoulette}
-                            className="py-3 px-6 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs rounded-2xl shadow-lg transition border border-amber-600 inline-flex items-center gap-2 cursor-pointer active:scale-95"
-                          >
-                            <Sparkles className="w-4 h-4 text-slate-950" />
-                            <span>[ 운명의 룰렛 돌리기 ]</span>
-                          </button>
-                        </div>
-                      )}
-
-                      {/* 기존 회의실 호환용 테스트 룰렛 미리보기 카드 */}
-                      {(roomDetails.room.engineVersion || 1) < 7 && (
-                      <div className="bg-slate-50 border border-slate-200 p-5 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
-                        <div className="space-y-1 text-center sm:text-left">
-                          <span className="text-xs font-black text-slate-800 flex items-center gap-1.5 justify-center sm:justify-start">
-                            <Sparkles className="w-4 h-4 text-amber-500" />
-                            🧪 테스트용 룰렛 미리보기
-                          </span>
-                          <p className="text-[11px] text-slate-500 font-medium">
-                            실제 최종 결과 및 DB 데이터에 영향을 주지 않으며, 룰렛 UI 및 회전 기능을 시연할 수 있습니다.
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRoulettePurpose('PREVIEW');
-                            setRouletteWinnerResult(null);
-                            setShowRouletteModal(true);
-                          }}
-                          className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs rounded-xl transition shadow-xs shrink-0 border border-amber-500 flex items-center gap-1.5 cursor-pointer active:scale-95"
-                        >
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>룰렛 돌리기 (미리보기)</span>
-                        </button>
-                      </div>
-                      )}
-
-                      {/* ③ 최종 선정 아이디어 카드 (Spotlight) */}
-                      <div className="bg-white p-6 md:p-8 rounded-3xl border border-indigo-200 shadow-lg space-y-5 relative overflow-hidden">
-                        <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-600 via-amber-400 to-indigo-600" />
-
-                        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                          <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
-                            <Award className="w-5 h-5 text-amber-500" />
-                            🏆 최종 선정 아이디어
-                          </h2>
-                          <button
-                            type="button"
-                            onClick={() => setShowWinnerModal(true)}
-                            className="text-[11px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-xl hover:bg-indigo-100 transition"
-                          >
-                            축하 팝업 열기
-                          </button>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-4 pt-1">
-                          {(!roomDetails?.ideas || roomDetails.ideas.filter(i => i && i.status === 'WINNER').length === 0) ? (
-                            <div className="text-center py-6 text-slate-500 text-xs font-medium bg-slate-50 rounded-2xl border border-slate-100">
-                              최종 확정된 우승 아이디어를 불러오는 중입니다.
+                    <div className="max-w-5xl mx-auto text-left">
+                      {meetingMinutes ? (
+                        <div id="meeting-minutes-report" className="meeting-minutes bg-white border border-slate-300 shadow-sm p-5 md:p-10">
+                          <div className="meeting-minutes-screen-only flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8 bg-slate-900 text-white p-5 rounded-2xl">
+                            <div>
+                              <p className="text-[10px] font-black text-amber-400 tracking-widest">DECISION RECORD & ACTION PLAN</p>
+                              <h2 className="text-lg font-black mt-1">회사에서 바로 공유할 수 있는 의사결정 회의록</h2>
+                              <p className="text-xs text-slate-300 mt-1">화면과 PDF는 동일한 확정 데이터를 사용합니다.</p>
                             </div>
-                          ) : (
-                            roomDetails.ideas.filter(i => i && i.status === 'WINNER').map(winner => (
-                              <div key={winner.id} className="p-5 bg-gradient-to-br from-indigo-50/50 to-amber-50/30 rounded-2xl border border-indigo-100 space-y-2.5">
-                                <div className="flex items-center justify-between gap-2">
-                                  <h3 className="text-lg font-black text-indigo-950 tracking-tight">
-                                    {winner.title}
-                                  </h3>
-                                  <span className="text-[11px] font-extrabold text-amber-900 bg-amber-200/90 border border-amber-300 px-2.5 py-0.5 rounded-full shrink-0">
-                                    {winner.winnerSelectionMethod === 'ROULETTE'
-                                      ? '롤렛 선정'
-                                      : winner.winnerSelectionMethod === 'AUTO_ALL'
-                                        ? '후보 수 충족 · 자동 선정'
-                                        : '누적 별 투표 선정'}
-                                  </span>
-                                </div>
-                                <p className="text-xs md:text-sm text-slate-600 leading-relaxed font-medium">
-                                  {winner.description}
-                                </p>
-                                <div className="pt-2 border-t border-indigo-100/60 flex items-center justify-between text-xs font-bold text-indigo-600">
-                                  <span>제안자 : {winner.submitterName}</span>
-                                  <span>⭐ 최종 득표: {roomDetails.starVotes?.[winner.id] || 0}표</span>
-                                </div>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </div>
-
-                      {/* ④ 최종 선정 이유 (AI 요약 리포트 및 근처 평가 근거) */}
-                      <div className="bg-white p-6 md:p-8 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-                        <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-                          <Sparkles className="w-5 h-5 text-amber-500" />
-                          <h3 className="text-base font-black text-slate-900">최종 선정 이유 및 AI 리포트</h3>
-                        </div>
-
-                        {roomDetails.aiFinalSummary ? (
-                          <div className="space-y-4">
-                            <SafeMarkdown content={roomDetails.aiFinalSummary} />
-                          </div>
-                        ) : (
-                          <div className="bg-slate-50 p-6 rounded-2xl border border-slate-200/80 text-center space-y-2">
-                            <p className="text-xs text-slate-600 font-bold">
-                              💡 평가 데이터 및 투표 근거를 종합하여 세부 리포트를 도출하는 중입니다.
-                            </p>
-                            <p className="text-[11px] text-slate-400">
-                              (참여자의 평가 데이터가 충분하지 않을 경우 기본 평가 점수 및 별 스티커 집계 결과를 기준으로 표출됩니다)
-                            </p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* ⑤ 라운드별 의사결정 과정 타임라인 */}
-                      <div className="bg-white p-6 md:p-8 rounded-3xl border border-slate-200 shadow-sm space-y-5">
-                        <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-                          <FileText className="w-5 h-5 text-indigo-600" />
-                          <h3 className="text-base font-black text-slate-900">라운드별 의사결정 및 소거 과정</h3>
-                        </div>
-
-                        {/* Process Step Progression Bar */}
-                        {roomDetails.room.decisionMode === 'QUICK' ? (
-                          <div className="grid grid-cols-3 gap-1.5 text-center text-[10px] font-bold text-slate-600 bg-slate-100 p-2 rounded-2xl">
-                            <div className="bg-indigo-600 text-white p-1.5 rounded-xl">1단계 선택지</div>
-                            <div className="bg-indigo-600 text-white p-1.5 rounded-xl">2단계 익명투표</div>
-                            <div className="bg-amber-400 text-slate-950 p-1.5 rounded-xl font-black">3단계 결과</div>
-                          </div>
-                        ) : (
-                          <div className="grid grid-cols-5 gap-1.5 text-center text-[10px] font-bold text-slate-600 bg-slate-100 p-2 rounded-2xl">
-                            <div className="bg-indigo-600 text-white p-1.5 rounded-xl">1단계 아이디어</div>
-                            <div className="bg-indigo-600 text-white p-1.5 rounded-xl">2단계 기준확정</div>
-                            <div className="bg-indigo-600 text-white p-1.5 rounded-xl">3단계 종합점수</div>
-                            <div className="bg-indigo-600 text-white p-1.5 rounded-xl">4단계 별투표</div>
-                            <div className="bg-amber-400 text-slate-950 p-1.5 rounded-xl font-black">5단계 최종결과</div>
-                          </div>
-                        )}
-
-                        <div className="space-y-5 border-l-2 border-slate-200 pl-4 ml-2 pt-2">
-                          {(!roomDetails?.rounds || roomDetails.rounds.length === 0) ? (
-                            <div className="space-y-1 relative">
-                              <div className="absolute -left-[23px] top-1.5 w-2.5 h-2.5 rounded-full bg-indigo-600" />
-                              <span className="text-[10px] font-black text-indigo-600">세션 소거 완료</span>
-                              <h4 className="text-xs md:text-sm font-bold text-slate-900">단일 라운드 심사 후 최종 우승작 결정</h4>
-                              <p className="text-xs text-slate-500 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100 mt-1">
-                                {roomDetails.room.decisionMode === 'QUICK'
-                                  ? '모든 참여자가 다른 사람의 선택을 보지 않고 투표한 뒤 결과를 동시에 공개했습니다.'
-                                  : '전체 구성원의 공통 기준 평가와 최종 익명 투표를 근거로 최종 선정되었습니다.'}
-                              </p>
+                            <div className="flex gap-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setShowWinnerModal(true)}
+                                className="px-4 py-2.5 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-bold border border-white/20"
+                              >
+                                결과 팝업
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleDownloadPDF}
+                                className="px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl text-xs font-black flex items-center gap-2 border border-amber-500"
+                              >
+                                <Download className="w-4 h-4" />
+                                의사결정 회의록 PDF 저장
+                              </button>
                             </div>
-                          ) : (
-                            (roomDetails.rounds || []).map(round => (
-                              <div key={round.id} className="space-y-1 relative">
-                                <div className="absolute -left-[23px] top-1.5 w-2.5 h-2.5 rounded-full bg-rose-500" />
-                                <span className="text-[10px] font-black text-rose-500">{round.roundNumber}라운드 탈락 및 소거 이력</span>
-                                <h4 className="text-xs md:text-sm font-bold text-slate-900">
-                                  {(round.eliminatedIdeaIds || []).map(id => roomDetails?.ideas?.find(i => i.id === id)?.title || '아이디어').join(', ')} 소거
-                                </h4>
-                                <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100 mt-1">
-                                  {round.aiSummaryText}
-                                </p>
-                              </div>
-                            ))
+                          </div>
+
+                          <header className="meeting-minutes-header text-center mb-7">
+                            <p className="meeting-minutes-print-only text-[10px] tracking-[0.25em] text-slate-500 font-bold mb-2">WHYNOT DECISION RECORD</p>
+                            <h1 className="text-2xl md:text-3xl font-black text-slate-950">의사결정 회의록</h1>
+                            <p className="text-sm font-bold text-slate-700 mt-2">{meetingMinutes.room.title}</p>
+                          </header>
+
+                          <section className="meeting-minutes-section">
+                            <h2 className="meeting-minutes-section-title">1. 회의 기본 정보</h2>
+                            <table className="meeting-minutes-table">
+                              <tbody>
+                                <tr>
+                                  <th>회의명</th><td>{meetingMinutes.room.title}</td>
+                                  <th>의사결정 방식</th><td>{meetingMinutes.room.decisionMode === 'QUICK' ? 'WhyNot 빠른 결정' : 'WhyNot 근거 기반 결정'}</td>
+                                </tr>
+                                <tr>
+                                  <th>결정 기간</th><td>{meetingMinutes.decisionPeriod}</td>
+                                  <th>최종 선정 수</th><td>{meetingMinutes.room.targetWinnerCount || 1}개</td>
+                                </tr>
+                                <tr>
+                                  <th>방장</th><td>{meetingMinutes.hostName}</td>
+                                  <th>참여 인원</th><td>{meetingMinutes.participantNames.length || roomDetails.participantCount || 0}명</td>
+                                </tr>
+                                <tr>
+                                  <th>참석자</th><td>{meetingMinutes.participantNames.join(', ') || '참여자 정보 없음'}</td>
+                                  <th>외부 투표자</th><td>{meetingMinutes.externalVoterCount > 0 ? `${meetingMinutes.externalVoterCount}명` : '없음'}</td>
+                                </tr>
+                                {meetingMinutes.room.description?.trim() && (
+                                  <tr>
+                                    <th>회의 설명</th><td colSpan={3}>{meetingMinutes.room.description.trim()}</td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </section>
+
+                          <section className="meeting-minutes-section">
+                            <h2 className="meeting-minutes-section-title">2. 회의 안건</h2>
+                            <table className="meeting-minutes-table">
+                              <tbody>
+                                <tr><th>주요 안건</th><td>{meetingMinutes.room.title}</td></tr>
+                                <tr><th>검토 후보</th><td>{meetingMinutes.candidateRows.map(idea => idea.title).join(', ')}</td></tr>
+                                <tr><th>결정 목표</th><td>검토 후보 중 최종 실행 아이디어 {meetingMinutes.room.targetWinnerCount || 1}개 선정</td></tr>
+                                <tr><th>진행 방식</th><td>{meetingMinutes.room.decisionMode === 'QUICK' ? '선택지 등록 → 익명 누적 별 투표 → 최종 결과 확정' : '공통 평가 기준 확정 → 익명 점수·피드백 → 누적 별 투표 → 최종 결과 확정'}</td></tr>
+                              </tbody>
+                            </table>
+                          </section>
+
+                          <section className="meeting-minutes-section">
+                            <h2 className="meeting-minutes-section-title">3. 최종 의사결정</h2>
+                            <table className="meeting-minutes-table">
+                              <tbody>
+                                <tr><th>최종 선정안</th><td className="font-black text-slate-950">{meetingMinutes.winnerNames}</td></tr>
+                                <tr>
+                                  <th>실행 내용</th>
+                                  <td>{meetingMinutes.winners.map(winner => `${winner.title}: ${winner.description}`).join(' / ')}</td>
+                                </tr>
+                                <tr>
+                                  <th>선정 방식</th>
+                                  <td>{meetingMinutes.winners.some(winner => winner.winnerSelectionMethod === 'ROULETTE') ? '동률 룰렛 선정' : meetingMinutes.winners.every(winner => winner.winnerSelectionMethod === 'AUTO_ALL') ? '후보 수 충족에 따른 자동 선정' : '참여자별 별 3개를 사용하는 익명 누적 투표'}</td>
+                                </tr>
+                                <tr><th>투표 결과</th><td>{meetingMinutes.candidateVoteSummary || '최종 투표 생략'}</td></tr>
+                                <tr><th>최종 결론</th><td>{meetingMinutes.winnerNames}을(를) 최종 실행안으로 선정합니다.</td></tr>
+                              </tbody>
+                            </table>
+                          </section>
+
+                          {meetingMinutes.room.decisionMode !== 'QUICK' && (
+                            <section className="meeting-minutes-section">
+                              <h2 className="meeting-minutes-section-title">4. 확정 평가 기준</h2>
+                              <table className="meeting-minutes-table">
+                                <thead><tr><th className="w-14">번호</th><th className="w-48">평가 기준</th><th>판단 내용</th></tr></thead>
+                                <tbody>
+                                  {(roomDetails.criteria || []).filter(criterion => criterion.confirmed).map((criterion, index) => (
+                                    <tr key={criterion.id}><td className="text-center">{index + 1}</td><td className="font-bold">{criterion.name}</td><td>{criterion.description}</td></tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </section>
                           )}
+
+                          <section className="meeting-minutes-section">
+                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '4' : '5'}. 후보별 평가 결과</h2>
+                            <table className="meeting-minutes-table">
+                              <thead>
+                                <tr><th>후보</th><th>제안 내용</th>{meetingMinutes.room.decisionMode !== 'QUICK' && <th className="w-24">점수</th>}<th className="w-24">별 투표</th><th className="w-24">결과</th></tr>
+                              </thead>
+                              <tbody>
+                                {meetingMinutes.candidateRows.map(idea => {
+                                  const score = meetingMinutes.scoreForIdea(idea.id);
+                                  return (
+                                    <tr key={idea.id}>
+                                      <td className="font-bold">{idea.title}</td>
+                                      <td>{idea.description}</td>
+                                      {meetingMinutes.room.decisionMode !== 'QUICK' && <td className="text-center">{score === undefined ? '-' : `${Number(score).toLocaleString('ko-KR')}점`}</td>}
+                                      <td className="text-center">{roomDetails.starVotes?.[idea.id] || 0}표</td>
+                                      <td className={`text-center font-black ${idea.status === 'WINNER' ? 'text-indigo-700' : 'text-slate-500'}`}>{idea.status === 'WINNER' ? '선정' : '미선정'}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </section>
+
+                          <section className="meeting-minutes-section">
+                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '5' : '6'}. 주요 논의 및 판단 근거</h2>
+                            <table className="meeting-minutes-table">
+                              <tbody>
+                                <tr><th>선정 근거</th><td><ul>{meetingMinutes.selectedReasons.map(reason => <li key={reason}>{reason}</li>)}</ul></td></tr>
+                                <tr><th>주요 우려</th><td><ul>{meetingMinutes.majorConcerns.length > 0 ? meetingMinutes.majorConcerns.map(item => <li key={item}>{item}</li>) : <li>수집된 평가에서 반복적으로 확인된 주요 우려가 없습니다.</li>}</ul></td></tr>
+                                <tr><th>미확인 가정</th><td><ul>{meetingMinutes.unverifiedAssumptions.length > 0 ? meetingMinutes.unverifiedAssumptions.map(item => <li key={item}>{item}</li>) : <li>현재 자료만으로 확인하기 어려운 가정은 실행 단계에서 별도로 확인해야 합니다.</li>}</ul></td></tr>
+                                <tr><th>후속 검증</th><td><ul>{meetingMinutes.validationTasks.length > 0 ? meetingMinutes.validationTasks.map(item => <li key={item}>{item}</li>) : <li>작은 범위의 실행 또는 사용자 테스트로 핵심 가정을 먼저 검증합니다.</li>}</ul></td></tr>
+                              </tbody>
+                            </table>
+                            <p className="meeting-minutes-note">위 내용은 참여자가 남긴 평가와 투표 데이터를 AI가 구조화한 요약이며, AI가 새로운 결론을 결정한 것이 아닙니다.</p>
+                          </section>
+
+                          <section className="meeting-minutes-section">
+                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '6' : '7'}. 의사결정 진행 기록</h2>
+                            <table className="meeting-minutes-table">
+                              <thead><tr><th className="w-32">단계</th><th className="w-28">참여 현황</th><th>진행 내용</th><th>결과</th></tr></thead>
+                              <tbody>
+                                {meetingMinutes.decisionSteps.map(([step, participation, activity, result]) => (
+                                  <tr key={step}><td className="font-bold">{step}</td><td className="text-center">{participation}</td><td>{activity}</td><td>{result}</td></tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            <p className="meeting-minutes-note">개별 평가와 투표 내용은 익명으로 보호되며, 최종 결과는 고정 명단 전원이 제출한 뒤 공개됩니다.</p>
+                          </section>
+
+                          <section className="meeting-minutes-section">
+                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '7' : '8'}. AI 제안 실행 과제 및 후속 조치</h2>
+                            <p className="text-xs text-slate-600 mb-3">최종 선정 아이디어와 평가 과정에서 확인된 우려·미확인 사항을 바탕으로 AI가 제안한 실행 과제입니다.</p>
+                            <table className="meeting-minutes-table">
+                              <thead><tr><th className="w-12">번호</th><th>AI 제안 실행 과제</th><th className="w-24">담당자</th><th className="w-24">완료 기한</th><th>완료 기준</th><th className="w-24">상태</th></tr></thead>
+                              <tbody>
+                                {meetingMinutes.actionItems.map((item, index) => (
+                                  <tr key={`${item.title}-${index}`}>
+                                    <td className="text-center">{index + 1}</td><td className="font-bold">{item.title}</td><td className="text-center">추후 확정</td><td className="text-center">추후 확정</td><td>{item.completionCriteria}</td><td className="text-center font-bold text-amber-800">논의 필요</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            <div className="meeting-minutes-disclaimer">
+                              <strong>안내:</strong> 위 실행 과제는 최종 선정 아이디어와 회의에서 수집된 평가 근거를 바탕으로 AI가 제안한 내용이며, 참여자들이 합의하여 확정한 업무 지시가 아닙니다. 참여자들은 각 과제의 필요성, 범위 및 우선순위를 추후 논의해야 합니다. 담당자와 완료 기한이 지정되지 않은 과제는 ‘추후 확정’으로 기록되며, 실제 실행 전에 담당자 지정과 일정 합의가 필요합니다.
+                            </div>
+                          </section>
+
+                          {(roomDetails.decisionRounds || []).length > 1 && (
+                            <section className="meeting-minutes-section">
+                              <h2 className="meeting-minutes-section-title">부록. 결정 회차 기록</h2>
+                              <table className="meeting-minutes-table">
+                                <thead><tr><th>회차</th><th>방식</th><th>시작 일시</th><th>상태</th></tr></thead>
+                                <tbody>{(roomDetails.decisionRounds || []).map(round => <tr key={round.id}><td className="text-center">{round.roundNumber}회차</td><td>{round.decisionMode === 'QUICK' ? '빠른 결정' : '근거 기반 결정'}</td><td>{new Date(round.startedAt).toLocaleString('ko-KR')}</td><td>{round.status === 'COMPLETED' ? '결과 보존 완료' : '진행 중'}</td></tr>)}</tbody>
+                              </table>
+                            </section>
+                          )}
+
+                          <footer className="meeting-minutes-footer">
+                            <span>회의 ID: {meetingMinutes.room.id}</span>
+                            <span>WhyNot에서 생성된 의사결정 기록</span>
+                          </footer>
                         </div>
-                      </div>
-
-                      {/* ⑥ 의견이 갈린 아이디어 (Controversial Ideas) */}
-                      {controversialIdeas.length > 0 && (
-                        <div className="bg-white p-6 md:p-8 rounded-3xl border border-amber-200 shadow-sm space-y-4">
-                          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-                            <AlertCircle className="w-5 h-5 text-amber-600" />
-                            <h3 className="text-base font-black text-slate-900">의견이 팽팽했던 쟁점 아이디어</h3>
-                          </div>
-                          <p className="text-xs text-slate-500 leading-relaxed">
-                            유지 의견과 제외 의견이 동시에 높았거나, 4단계 별 스티커 투표 치열한 경합으로 인상 깊었던 쟁점 후보입니다.
-                          </p>
-
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            {controversialIdeas.map(idea => {
-                              const stats = roomDetails.aggregatedScores?.[idea.id];
-                              const stars = roomDetails.starVotes?.[idea.id] || 0;
-
-                              return (
-                                <div key={idea.id} className="p-4 bg-amber-50/50 rounded-2xl border border-amber-200/80 space-y-1.5">
-                                  <h4 className="text-xs font-extrabold text-slate-900">{idea.title}</h4>
-                                  <p className="text-[11px] text-slate-600 leading-relaxed line-clamp-2">{idea.description}</p>
-                                  <div className="flex items-center gap-3 pt-1 text-[10px] font-bold text-amber-900">
-                                    {stats && (
-                                      <>
-                                        <span>👍 찬성: {stats.keepCount}표</span>
-                                        <span>👎 제외희망: {stats.excludeCount}표</span>
-                                      </>
-                                    )}
-                                    <span>⭐ 별스티커: {stars}표</span>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
+                      ) : (
+                        <div className="p-8 text-center text-sm text-slate-500">의사결정 회의록 데이터를 불러오는 중입니다.</div>
                       )}
 
-                      {/* Decision round history and safe re-review */}
-                      <div className="bg-white p-6 md:p-8 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-                        <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
-                          <div className="flex items-center gap-2">
-                            <RefreshCw className="w-5 h-5 text-indigo-600" />
-                            <h3 className="text-base font-black text-slate-900">결정 회차 기록</h3>
-                          </div>
-                          <span className="text-[10px] font-bold text-slate-500">
-                            이전 결과는 덮어쓰지 않습니다
-                          </span>
-                        </div>
-
-                        {(roomDetails.decisionRounds || []).length > 0 ? (
-                          <div className="space-y-2">
-                            {(roomDetails.decisionRounds || []).map(round => (
-                              <div key={round.id} className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl px-4 py-3">
-                                <div>
-                                  <p className="text-xs font-extrabold text-slate-800">
-                                    {round.roundNumber}회차 · {round.decisionMode === 'QUICK' ? '빠른 결정' : '근거 기반 결정'}
-                                  </p>
-                                  <p className="text-[10px] text-slate-500">
-                                    {round.status === 'COMPLETED' ? '결과 보존 완료' : '진행 중'}
-                                  </p>
-                                </div>
-                                <span className="text-[10px] text-slate-400 font-medium">
-                                  {new Date(round.startedAt).toLocaleString('ko-KR')}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-xs text-slate-500">기존 방식으로 완료된 방이라 별도 회차 기록이 없습니다.</p>
-                        )}
-
-                        {roomDetails.room.hostId === userId && (roomDetails.room.engineVersion || 1) < 5 && !refinement?.enabled && (
-                          <button
-                            type="button"
-                            onClick={handleRestartStage2WithSurvivingIdeas}
-                            disabled={(roomDetails.ideas || []).filter(idea =>
-                              idea.status === 'WINNER' ||
-                              (idea.status === 'ELIMINATED' && idea.eliminatedRound === undefined)
-                            ).length < 2}
-                            className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl text-xs font-black transition"
-                          >
-                            결과를 보존하고 새 재검토 회차 시작
-                          </button>
-                        )}
-                      </div>
-
-                      {/* 로비 홈으로 이동 버튼 */}
-                      <div className="text-center pt-4">
-                        <button
-                          type="button"
-                          onClick={handleLeaveRoom}
-                          className="px-7 py-3 bg-indigo-600 text-white hover:bg-indigo-700 rounded-2xl text-xs font-bold transition shadow-md cursor-pointer"
-                        >
+                      <div className="meeting-minutes-screen-only text-center pt-6">
+                        <button type="button" onClick={handleLeaveRoom} className="px-7 py-3 bg-indigo-600 text-white hover:bg-indigo-700 rounded-2xl text-xs font-bold transition shadow-md">
                           로비 홈화면으로 이동하기
                         </button>
                       </div>
-
                     </div>
                   )}
 

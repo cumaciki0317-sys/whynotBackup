@@ -10,3 +10,202 @@ button:disabled,
 [role="button"][aria-disabled="true"] {
   cursor: not-allowed;
 }
+
+.meeting-minutes {
+  color: #0f172a;
+  font-family: "Pretendard", "Noto Sans KR", "Malgun Gothic", sans-serif;
+}
+
+.meeting-minutes-print-only {
+  display: none;
+}
+
+.meeting-minutes-section {
+  margin-top: 1.75rem;
+}
+
+.meeting-minutes-section-title {
+  margin-bottom: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border-left: 4px solid #4f46e5;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.meeting-minutes-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+.meeting-minutes-table th,
+.meeting-minutes-table td {
+  border: 1px solid #94a3b8;
+  padding: 0.55rem 0.65rem;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.meeting-minutes-table th {
+  background: #f1f5f9;
+  color: #1e293b;
+  font-weight: 800;
+  text-align: center;
+}
+
+.meeting-minutes-table tbody > tr > th {
+  width: 8.5rem;
+}
+
+.meeting-minutes-table ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  list-style: disc;
+}
+
+.meeting-minutes-table li + li {
+  margin-top: 0.25rem;
+}
+
+.meeting-minutes-note {
+  margin-top: 0.55rem;
+  color: #64748b;
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.meeting-minutes-disclaimer {
+  margin-top: 0.75rem;
+  border: 1px solid #fbbf24;
+  background: #fffbeb;
+  padding: 0.75rem;
+  color: #78350f;
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+
+.meeting-minutes-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid #cbd5e1;
+  color: #64748b;
+  font-size: 0.65rem;
+}
+
+@page {
+  size: A4 portrait;
+  margin: 12mm;
+}
+
+@media print {
+  html,
+  body {
+    width: 210mm;
+    min-height: 297mm;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  #meeting-minutes-report,
+  #meeting-minutes-report * {
+    visibility: visible !important;
+  }
+
+  #meeting-minutes-report {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  .meeting-minutes-screen-only {
+    display: none !important;
+  }
+
+  .meeting-minutes-print-only {
+    display: block !important;
+  }
+
+  .meeting-minutes-header {
+    margin-bottom: 8mm !important;
+  }
+
+  .meeting-minutes-header h1 {
+    color: #000 !important;
+    font-size: 20pt !important;
+  }
+
+  .meeting-minutes-section {
+    margin-top: 6mm !important;
+    break-inside: auto;
+  }
+
+  .meeting-minutes-section-title {
+    margin-bottom: 2mm !important;
+    padding: 2mm 2.5mm !important;
+    border-left: 3px solid #000 !important;
+    background: #eee !important;
+    color: #000 !important;
+    font-size: 10pt !important;
+    break-after: avoid-page;
+  }
+
+  .meeting-minutes-table {
+    color: #000 !important;
+    font-size: 8.2pt !important;
+    line-height: 1.45 !important;
+  }
+
+  .meeting-minutes-table thead {
+    display: table-header-group;
+  }
+
+  .meeting-minutes-table tr {
+    break-inside: avoid-page;
+  }
+
+  .meeting-minutes-table th,
+  .meeting-minutes-table td {
+    border-color: #444 !important;
+    padding: 2.2mm 2.5mm !important;
+    color: #000 !important;
+    background: #fff !important;
+  }
+
+  .meeting-minutes-table th {
+    background: #eee !important;
+  }
+
+  .meeting-minutes-note,
+  .meeting-minutes-disclaimer,
+  .meeting-minutes-footer {
+    color: #333 !important;
+    font-size: 7.5pt !important;
+  }
+
+  .meeting-minutes-disclaimer {
+    border-color: #777 !important;
+    background: #f7f7f7 !important;
+  }
+}
