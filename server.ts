@@ -659,7 +659,7 @@ type AiBoundaryTiebreakOutcome =
     };
 
 type BoundaryRunoffResolutionMethod = 'USER_RUNOFF' | 'RUNOFF_RANDOM' | 'AUTO_RANDOM';
-type BoundaryRunoffSourceReason = 'AI_INSUFFICIENT_EVIDENCE' | 'AI_UNAVAILABLE';
+type BoundaryRunoffSourceReason = 'AI_INSUFFICIENT_EVIDENCE' | 'AI_UNAVAILABLE' | 'FIRST_SCORE_TIE_ROULETTE';
 
 type BoundaryRunoffRecord = {
   id: string;
@@ -1341,9 +1341,11 @@ function normalizeBoundaryRunoffRow(row: any): BoundaryRunoffRecord {
       ? (row.eligible_voter_ids ?? row.eligibleVoterIds).map(String)
       : [],
     status: row.status === 'COMPLETED' ? 'COMPLETED' : 'VOTING',
-    sourceReason: row.source_reason === 'AI_UNAVAILABLE' || row.sourceReason === 'AI_UNAVAILABLE'
-      ? 'AI_UNAVAILABLE'
-      : 'AI_INSUFFICIENT_EVIDENCE',
+    sourceReason: row.source_reason === 'FIRST_SCORE_TIE_ROULETTE' || row.sourceReason === 'FIRST_SCORE_TIE_ROULETTE'
+      ? 'FIRST_SCORE_TIE_ROULETTE'
+      : row.source_reason === 'AI_UNAVAILABLE' || row.sourceReason === 'AI_UNAVAILABLE'
+        ? 'AI_UNAVAILABLE'
+        : 'AI_INSUFFICIENT_EVIDENCE',
     resolutionMethod: (row.resolution_method ?? row.resolutionMethod) || undefined,
     selectedIdeaIds: Array.isArray(row.selected_idea_ids ?? row.selectedIdeaIds)
       ? (row.selected_idea_ids ?? row.selectedIdeaIds).map(String)
@@ -1417,7 +1419,10 @@ async function applyCompletedBoundaryRunoff(
 
   let completedSnapshot: Record<string, any>;
   if (SUPABASE_CONFIGURED) {
-    const { data, error } = await supabase.rpc('apply_score_boundary_runoff_result_v16', {
+    const applyRpc = runoff.sourceReason === 'FIRST_SCORE_TIE_ROULETTE'
+      ? 'apply_score_boundary_roulette_result_v17'
+      : 'apply_score_boundary_runoff_result_v16';
+    const { data, error } = await supabase.rpc(applyRpc, {
       p_room_id: room.id,
       p_round_id: round.id,
       p_runoff_id: runoff.id
@@ -1486,7 +1491,9 @@ async function finalizeBoundaryRunoffIfReady(
   const validBallots = new Map(
     Array.from(ballots.entries()).filter(([voterId]) => eligibleSet.has(voterId))
   );
+  const isHostStartedRoulette = runoff.sourceReason === 'FIRST_SCORE_TIE_ROULETTE';
   const deadlineExpired = Date.now() >= new Date(runoff.deadlineAt).getTime();
+  if (isHostStartedRoulette && !forceRandom) return { runoff };
   if (!forceRandom && !deadlineExpired && validBallots.size < runoff.eligibleVoterIds.length) {
     return { runoff };
   }
@@ -1593,10 +1600,12 @@ async function createOrLoadBoundaryRunoff(
       .filter(idea => boundaryIdeaIds.includes(idea.id))
       .map(idea => String(idea.submitterId))
   );
-  const eligibleVoterIds = Array.from(progress.requiredUsers)
-    .map(String)
-    .filter(voterId => !boundaryAuthorIds.has(voterId))
-    .sort();
+  const eligibleVoterIds = sourceReason === 'FIRST_SCORE_TIE_ROULETTE'
+    ? []
+    : Array.from(progress.requiredUsers)
+      .map(String)
+      .filter(voterId => !boundaryAuthorIds.has(voterId))
+      .sort();
   const startedAt = new Date().toISOString();
   const deadlineAt = new Date(Date.now() + BOUNDARY_RUNOFF_DEADLINE_MS).toISOString();
   const runoffId = `score-boundary-runoff-${hashOpaqueSecret(`${room.id}:${round.id}`).slice(0, 40)}`;
@@ -1663,7 +1672,7 @@ async function createOrLoadBoundaryRunoff(
 
   // If fewer than two neutral participants remain, a revote cannot add reliable
   // new evidence. Resolve transparently by random draw instead of deadlocking.
-  if (runoff.eligibleVoterIds.length < 2) {
+  if (runoff.sourceReason !== 'FIRST_SCORE_TIE_ROULETTE' && runoff.eligibleVoterIds.length < 2) {
     return finalizeBoundaryRunoffIfReady(room, round, runoff, true);
   }
   return { runoff };
@@ -1678,7 +1687,10 @@ async function resolveBoundaryRunoffIfNeeded(room: Room): Promise<void> {
   if (!round) return;
   const runoff = await loadBoundaryRunoffRecord(room.id, round.id);
   if (!runoff) return;
-  if (runoff.status === 'COMPLETED' || Date.now() >= new Date(runoff.deadlineAt).getTime()) {
+  if (runoff.status === 'COMPLETED' || (
+    runoff.sourceReason !== 'FIRST_SCORE_TIE_ROULETTE' &&
+    Date.now() >= new Date(runoff.deadlineAt).getTime()
+  )) {
     await finalizeBoundaryRunoffIfReady(room, round, runoff);
   }
 }
@@ -1697,12 +1709,14 @@ async function buildBoundaryRunoffState(
     roundId: runoff.roundId,
     status: runoff.status,
     sourceReason: runoff.sourceReason,
+    rouletteMode: runoff.sourceReason === 'FIRST_SCORE_TIE_ROULETTE',
     candidateIdeaIds: runoff.candidateIdeaIds,
     remainingSlots: runoff.remainingSlots,
     deadlineAt: runoff.deadlineAt,
     submittedCount: Array.from(ballots.keys()).filter(voterId => runoff.eligibleVoterIds.includes(voterId)).length,
     expectedCount: runoff.eligibleVoterIds.length,
-    canVote: runoff.status === 'VOTING' && runoff.eligibleVoterIds.includes(userId),
+    canVote: runoff.sourceReason !== 'FIRST_SCORE_TIE_ROULETTE' && runoff.status === 'VOTING' && runoff.eligibleVoterIds.includes(userId),
+    canStartRoulette: runoff.sourceReason === 'FIRST_SCORE_TIE_ROULETTE' && runoff.status === 'VOTING' && room.hostId === userId,
     myBallotSubmitted: ballots.has(userId),
     mySelectedIdeaIds: ballots.get(userId) || [],
     resolutionMethod: runoff.status === 'COMPLETED' ? runoff.resolutionMethod : undefined,
@@ -1721,6 +1735,7 @@ async function tryFinalizeScoreEvaluationRound(
   let maxSurvivors = MAX_SECOND_ROUND_SURVIVORS;
   let snapshot: Record<string, any> | null = null;
   let aiDecision: AiBoundaryTiebreakDecision | undefined;
+  let policySelectedIds: string[] | undefined;
 
   if (SUPABASE_CONFIGURED) {
     const { data, error } = await supabase.rpc('finalize_score_evaluation_round', {
@@ -1739,7 +1754,7 @@ async function tryFinalizeScoreEvaluationRound(
       ? Math.max(1, Array.isArray(snapshot.candidateIdeaIds) ? snapshot.candidateIdeaIds.length : 1)
       : MAX_SECOND_ROUND_SURVIVORS;
 
-    const guaranteedIds = Array.isArray(snapshot.guaranteedSurvivorIdeaIds)
+    let guaranteedIds = Array.isArray(snapshot.guaranteedSurvivorIdeaIds)
       ? snapshot.guaranteedSurvivorIdeaIds.map(String)
       : [];
     let survivorIdeaIds: string[];
@@ -1748,6 +1763,45 @@ async function tryFinalizeScoreEvaluationRound(
       if (isFirstRound) {
         throw new Error('1차 평가는 AI 경계 판정을 사용하지 않습니다. V8 데이터베이스 마이그레이션을 확인해 주세요.');
       }
+      if (Number(room.engineVersion || 1) >= 8) {
+        const { data: preparedData, error: preparedError } = await supabase.rpc('prepare_second_round_tiebreak_v17', {
+          p_room_id: room.id,
+          p_round_id: round.id
+        });
+        if (preparedError) throw new Error(`1차 점수 재비교를 완료하지 못했습니다: ${preparedError.message}`);
+        snapshot = preparedData && typeof preparedData === 'object' ? preparedData as Record<string, any> : null;
+        if (!snapshot) throw new Error('1차 점수 재비교 결과를 확인하지 못했습니다.');
+        guaranteedIds = Array.isArray(snapshot.guaranteedSurvivorIdeaIds)
+          ? snapshot.guaranteedSurvivorIdeaIds.map(String)
+          : [];
+        if (snapshot.aggregationStatus === 'AWAITING_ROULETTE') {
+          const boundaryIdeaIds = Array.isArray(snapshot.boundaryTieIdeaIds)
+            ? snapshot.boundaryTieIdeaIds.map(String)
+            : [];
+          const remainingSlots = Number(snapshot.remainingSlots || 0);
+          const rouletteResult = await createOrLoadBoundaryRunoff(
+            room,
+            round,
+            boundaryIdeaIds,
+            remainingSlots,
+            guaranteedIds,
+            'FIRST_SCORE_TIE_ROULETTE',
+            snapshot
+          );
+          return {
+            aggregationStatus: 'ROULETTE',
+            runoffId: rouletteResult.runoff.id,
+            boundaryTieIdeaIds: boundaryIdeaIds,
+            remainingSlots
+          };
+        }
+        if (snapshot.aggregationStatus !== 'READY_TO_FINALIZE') {
+          throw new Error(`지원하지 않는 1차 점수 재비교 상태입니다: ${snapshot.aggregationStatus || '없음'}`);
+        }
+        survivorIdeaIds = Array.isArray(snapshot.serverSelectedIdeaIds)
+          ? snapshot.serverSelectedIdeaIds.map(String)
+          : [];
+      } else {
       const boundaryIdeaIds = Array.isArray(snapshot.boundaryTieIdeaIds)
         ? snapshot.boundaryTieIdeaIds.map(String)
         : [];
@@ -1810,6 +1864,7 @@ async function tryFinalizeScoreEvaluationRound(
           boundaryTieIdeaIds: boundaryIdeaIds,
           remainingSlots
         };
+      }
       }
     } else if (snapshot.aggregationStatus === 'READY_TO_FINALIZE') {
       survivorIdeaIds = Array.isArray(snapshot.serverSelectedIdeaIds)
@@ -1885,7 +1940,60 @@ async function tryFinalizeScoreEvaluationRound(
         ? []
         : ranked.filter(idea => scoreStats[idea.id].totalScore === boundaryScore).map(idea => idea.id);
       const remainingSlots = boundaryScore === null ? 0 : maxSurvivors - guaranteedIds.length;
+      if (
+        !isFirstRound &&
+        Number(room.engineVersion || 1) >= 8 &&
+        boundaryIds.length > remainingSlots &&
+        remainingSlots > 0
+      ) {
+        const firstRoundId = round.parentRoundId;
+        if (!firstRoundId) throw new Error('2차 평가의 1차 평가 회차를 찾을 수 없습니다.');
+        const firstScoreTotals = Object.fromEntries(boundaryIds.map(ideaId => [ideaId, 0])) as Record<string, number>;
+        (evaluations.get(room.id) || [])
+          .filter(evaluation => evaluation.roundId === firstRoundId && boundaryIds.includes(evaluation.ideaId))
+          .forEach(evaluation => {
+            firstScoreTotals[evaluation.ideaId] += Number(evaluation.overallScore || 0);
+          });
+        const firstRanked = [...boundaryIds].sort((left, right) =>
+          firstScoreTotals[right] - firstScoreTotals[left] || left.localeCompare(right)
+        );
+        const firstCutoff = firstScoreTotals[firstRanked[remainingSlots - 1]];
+        const firstGuaranteed = firstRanked.filter(ideaId => firstScoreTotals[ideaId] > firstCutoff);
+        const rouletteIds = firstRanked.filter(ideaId => firstScoreTotals[ideaId] === firstCutoff);
+        const rouletteSlots = remainingSlots - firstGuaranteed.length;
+        const combinedGuaranteed = [...guaranteedIds, ...firstGuaranteed];
+        if (rouletteIds.length > rouletteSlots) {
+          const aggregationSnapshot = {
+            candidateIdeaIds: ranked.map(idea => idea.id),
+            scoreStats,
+            firstRoundScoreStats: firstScoreTotals,
+            boundaryTieIdeaIds: rouletteIds,
+            guaranteedSurvivorIdeaIds: combinedGuaranteed,
+            remainingSlots: rouletteSlots,
+            aggregationStatus: 'AWAITING_ROULETTE'
+          };
+          const rouletteResult = await createOrLoadBoundaryRunoff(
+            room,
+            round,
+            rouletteIds,
+            rouletteSlots,
+            combinedGuaranteed,
+            'FIRST_SCORE_TIE_ROULETTE',
+            aggregationSnapshot
+          );
+          return {
+            aggregationStatus: 'ROULETTE',
+            runoffId: rouletteResult.runoff.id,
+            boundaryTieIdeaIds: rouletteIds,
+            remainingSlots: rouletteSlots
+          };
+        }
+        policySelectedIds = [...combinedGuaranteed, ...rouletteIds];
+      }
       if (boundaryIds.length > remainingSlots && remainingSlots > 0) {
+        if (policySelectedIds) {
+          // V8 uses first-round totals before any random boundary resolution.
+        } else {
         const existingRunoff = await loadBoundaryRunoffRecord(room.id, round.id);
         if (existingRunoff) {
           const runoffResult = await finalizeBoundaryRunoffIfReady(room, round, existingRunoff);
@@ -1929,8 +2037,11 @@ async function tryFinalizeScoreEvaluationRound(
           if (runoffResult.completedSnapshot) return runoffResult.completedSnapshot;
           return { aggregationStatus: 'RUNOFF', runoffId: runoffResult.runoff.id, boundaryTieIdeaIds: boundaryIds, remainingSlots };
         }
+        }
       }
-      const survivorIdeaIds = aiDecision
+      const survivorIdeaIds = policySelectedIds
+        ? policySelectedIds
+        : aiDecision
         ? [...guaranteedIds, ...aiDecision.selectedIdeaIds]
         : boundaryScore === null
           ? baseIds
@@ -7986,6 +8097,9 @@ app.post('/api/rooms/:id/screening/runoff', async (req: AuthenticatedRequest, re
 
     const runoff = await loadBoundaryRunoffRecord(id, round.id);
     if (!runoff) return res.status(409).json({ error: '진행 중인 경계 동점 결선이 없습니다.' });
+    if (runoff.sourceReason === 'FIRST_SCORE_TIE_ROULETTE') {
+      return res.status(409).json({ error: '이 동점은 참여자 결선 대상이 아니라 방장 실행 룰렛 대상입니다.' });
+    }
     if (runoff.status !== 'VOTING') {
       await finalizeBoundaryRunoffIfReady(room, round, runoff);
       return res.status(409).json({ error: '이미 종료된 경계 동점 결선입니다.' });
@@ -8039,6 +8153,50 @@ app.post('/api/rooms/:id/screening/runoff', async (req: AuthenticatedRequest, re
     console.error('Boundary runoff ballot failed:', error);
     return res.status(503).json({
       error: error instanceof Error ? error.message : '동점 결선 투표를 처리하지 못했습니다.'
+    });
+  }
+});
+
+/** Run the locked second-round cutoff roulette. No participant consent or ballot is used. */
+app.post('/api/rooms/:id/screening/roulette', async (req: AuthenticatedRequest, res) => {
+  try {
+    const { id } = req.params;
+    const room = await hydrateRoomFromSupabase(id);
+    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (room.hostId !== req.auth!.userId) {
+      return res.status(403).json({ error: '방장만 2차 컷라인 룰렛을 실행할 수 있습니다.' });
+    }
+    if (Number(room.engineVersion || 1) < 8 || room.status !== 'EVALUATION_ROUND_2') {
+      return res.status(409).json({ error: '현재 2차 컷라인 룰렛을 실행할 단계가 아닙니다.' });
+    }
+    const rounds = await loadDecisionRounds(id) as RefinementAwareDecisionRound[];
+    const round = [...rounds].reverse().find(candidate =>
+      candidate.status === 'ACTIVE' && candidate.evaluationMethod === 'SCORE_ONLY'
+    );
+    if (!round) return res.status(409).json({ error: '진행 중인 2차 점수 평가 회차가 없습니다.' });
+    const runoff = await loadBoundaryRunoffRecord(id, round.id);
+    if (!runoff || runoff.sourceReason !== 'FIRST_SCORE_TIE_ROULETTE') {
+      return res.status(409).json({ error: '실행 가능한 2차 컷라인 룰렛이 없습니다.' });
+    }
+    if (runoff.status === 'COMPLETED') {
+      await applyCompletedBoundaryRunoff(room, round, runoff);
+      return res.json({ success: true, alreadyCompleted: true, selectedIdeaIds: runoff.selectedIdeaIds });
+    }
+    const result = await finalizeBoundaryRunoffIfReady(room, round, runoff, true);
+    if (!result.completedSnapshot) throw new Error('2차 컷라인 룰렛 결과를 확정하지 못했습니다.');
+    return res.json({
+      success: true,
+      selectedIdeaIds: result.runoff.selectedIdeaIds,
+      randomSelectedIdeaIds: result.runoff.randomSelectedIdeaIds,
+      finalCandidateCount: Array.isArray(result.completedSnapshot.survivorIdeaIds)
+        ? result.completedSnapshot.survivorIdeaIds.length
+        : 0,
+      status: (rooms.get(id) || room).status
+    });
+  } catch (error) {
+    console.error('Second-round cutoff roulette failed:', error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : '2차 컷라인 룰렛을 실행하지 못했습니다.'
     });
   }
 });

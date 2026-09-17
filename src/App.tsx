@@ -32,6 +32,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Dices,
   Share2,
   MoreVertical
 } from 'lucide-react';
@@ -3890,6 +3891,24 @@ export default function App() {
     }, 500);
   };
 
+  const handleStartBoundaryRoulette = async () => {
+    const runoff = (roomDetails as any)?.boundaryRunoff;
+    if (!activeRoomId || !runoff?.rouletteMode || !runoff.canStartRoulette) return;
+    setIsSubmittingBoundaryRunoff(true);
+    try {
+      const response = await apiFetch(`/api/rooms/${activeRoomId}/screening/roulette`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.error || '2차 컷라인 룰렛을 실행하지 못했습니다.');
+      triggerToast(`룰렛으로 ${Number(data?.randomSelectedIdeaIds?.length || 0)}개 후보를 확정했습니다.`);
+      await fetchRoomDetails(activeRoomId, true);
+    } catch (error) {
+      triggerToast(error instanceof Error ? error.message : '2차 컷라인 룰렛을 실행하지 못했습니다.', 'error');
+      await fetchRoomDetails(activeRoomId, true);
+    } finally {
+      setIsSubmittingBoundaryRunoff(false);
+    }
+  };
+
   // Determine candidate ideas for Roulette Preview / Tie-breaker
   const rouletteCandidateIdeas = useMemo(() => {
     if (!roomDetails || !Array.isArray(roomDetails.ideas)) return [];
@@ -6604,6 +6623,53 @@ export default function App() {
                       const deadlineText = runoff.deadlineAt
                         ? new Date(runoff.deadlineAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
                         : '';
+
+                      if (runoff.rouletteMode) {
+                        return (
+                          <div className="space-y-5">
+                            <div className="bg-indigo-950 text-white p-6 rounded-3xl border border-indigo-800 shadow-lg space-y-4">
+                              <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                                <div className="space-y-2">
+                                  <span className="text-[10px] font-black tracking-widest uppercase text-amber-300">2차 평가 · 컷라인 룰렛</span>
+                                  <h2 className="text-xl font-black">1차 총점까지 같은 경계 후보를 룰렛으로 결정합니다</h2>
+                                  <p className="text-xs text-indigo-100/90 leading-relaxed max-w-2xl">
+                                    2차 총점과 1차 총점이 모두 같은 경계 후보만 자동으로 고정되었습니다. 참여자 동의나 추가 투표 없이 방장이 실행하면 서버 난수로 필요한 자리만 선정합니다.
+                                  </p>
+                                </div>
+                                <div className="shrink-0 rounded-2xl bg-white/10 border border-white/15 px-4 py-3 text-xs font-bold space-y-1 min-w-44">
+                                  <p>룰렛 후보 {candidateIds.length}개</p>
+                                  <p>선정 자리 {remainingSlots}개</p>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {candidates.map((idea, index) => (
+                                <div key={idea.id} className="p-5 rounded-2xl border border-indigo-200 bg-white shadow-sm">
+                                  <span className="text-[10px] font-black text-indigo-600">고정 룰렛 후보 #{index + 1}</span>
+                                  <h3 className="text-sm font-extrabold text-slate-900 mt-1">{idea.title}</h3>
+                                  <p className="text-xs text-slate-600 mt-2 leading-relaxed whitespace-pre-line">{idea.description}</p>
+                                </div>
+                              ))}
+                            </div>
+                            {runoff.canStartRoulette ? (
+                              <button
+                                type="button"
+                                onClick={handleStartBoundaryRoulette}
+                                disabled={isSubmittingBoundaryRunoff}
+                                className="w-full py-4 rounded-2xl bg-amber-400 hover:bg-amber-300 disabled:bg-slate-200 text-slate-950 text-sm font-black transition flex items-center justify-center gap-2"
+                              >
+                                {isSubmittingBoundaryRunoff ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Dices className="w-4 h-4" />}
+                                {isSubmittingBoundaryRunoff ? '룰렛 실행 중...' : `룰렛 시작 · ${remainingSlots}개 선정`}
+                              </button>
+                            ) : (
+                              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center">
+                                <p className="text-sm font-extrabold text-slate-800">방장이 룰렛을 시작하기를 기다리는 중입니다</p>
+                                <p className="text-xs text-slate-500 mt-1">룰렛 후보와 선정 자리 수는 서버에 고정되어 변경할 수 없습니다.</p>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
 
                       return (
                         <div className="space-y-6">
