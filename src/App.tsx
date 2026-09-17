@@ -521,8 +521,6 @@ export default function App() {
   const [newRoomMaxParticipants, setNewRoomMaxParticipants] = useState(2);
   const [newRoomTargetWinners, setNewRoomTargetWinners] = useState(1);
   const [newRoomDecisionMode, setNewRoomDecisionMode] = useState<DecisionMode>('QUICK');
-  const [newRoomVoteStartTime, setNewRoomVoteStartTime] = useState('');
-  const [newRoomVoteEndTime, setNewRoomVoteEndTime] = useState('');
   const [newRoomThreshold, setNewRoomThreshold] = useState(3);
   const [newRoomExternalVotersEnabled, setNewRoomExternalVotersEnabled] = useState(false);
   const [newRoomRequiredVoterCount, setNewRoomRequiredVoterCount] = useState(1);
@@ -729,8 +727,6 @@ export default function App() {
   const [editRoomMinThreshold, setEditRoomMinThreshold] = useState(3);
   const [editExternalVotersEnabled, setEditExternalVotersEnabled] = useState(false);
   const [editRequiredVoterCount, setEditRequiredVoterCount] = useState(1);
-  const [editFinalVoteStartAt, setEditFinalVoteStartAt] = useState('');
-  const [editFinalVoteEndAt, setEditFinalVoteEndAt] = useState('');
   const [isUpdatingRoomSettings, setIsUpdatingRoomSettings] = useState(false);
   const [isLeavingRoomMembership, setIsLeavingRoomMembership] = useState(false);
   const [isCancelingMyVoterRegistration, setIsCancelingMyVoterRegistration] = useState(false);
@@ -765,12 +761,6 @@ export default function App() {
     setEditRoomMinThreshold(roomDetails.room.minResponseThreshold || 3);
     setEditExternalVotersEnabled(Boolean(roomDetails.room.externalVotersEnabled));
     setEditRequiredVoterCount(Math.max(1, roomDetails.room.requiredVoterCount || 1));
-    setEditFinalVoteStartAt(toDateTimeLocalValue(
-      roomDetails.room.deadlines?.finalVoteStartAt || roomDetails.room.deadlines?.voteStartTime
-    ));
-    setEditFinalVoteEndAt(toDateTimeLocalValue(
-      roomDetails.room.deadlines?.finalVoteEndAt || roomDetails.room.deadlines?.evaluationAt
-    ));
     setShowRoomSettingsModal(true);
   };
 
@@ -786,30 +776,6 @@ export default function App() {
       return;
     }
     const finalVoteStarted = hasFinalVoteStarted(roomDetails.room);
-    const currentFinalVoteEndAt =
-      roomDetails.room.deadlines?.finalVoteEndAt || roomDetails.room.deadlines?.evaluationAt;
-    const currentFinalVoteEndLocal = toDateTimeLocalValue(currentFinalVoteEndAt);
-    const finalVoteEndChanged = editFinalVoteEndAt !== currentFinalVoteEndLocal;
-
-    if (!finalVoteStarted && editFinalVoteStartAt && editFinalVoteEndAt && editFinalVoteEndAt <= editFinalVoteStartAt) {
-      triggerToast('2차 투표 예정 마감 일시는 시작 일시보다 뒤여야 합니다.', 'error');
-      return;
-    }
-
-    if (finalVoteStarted && finalVoteEndChanged) {
-      if (roomDetails.room.finalVoteStatus !== 'VOTING') {
-        triggerToast('최종 투표 제출 단계가 끝난 뒤에는 예정 마감 일시를 변경할 수 없습니다.', 'error');
-        return;
-      }
-      if (
-        !currentFinalVoteEndAt ||
-        !editFinalVoteEndAt ||
-        Date.parse(editFinalVoteEndAt) <= Date.parse(currentFinalVoteEndAt)
-      ) {
-        triggerToast('투표 시작 후에는 기존 마감 일시보다 뒤로 연장하는 경우에만 변경할 수 있습니다.', 'error');
-        return;
-      }
-    }
 
     setIsUpdatingRoomSettings(true);
     try {
@@ -826,20 +792,10 @@ export default function App() {
             targetWinnerCount: editRoomTargetWinnerCount,
             minResponseThreshold: editRoomMinThreshold
           } : {}),
-          ...(finalVoteStarted
-            ? (finalVoteEndChanged ? {
-                deadlines: {
-                  finalVoteEndAt: editFinalVoteEndAt
-                }
-              } : {})
-            : {
+          ...(!finalVoteStarted ? {
                 externalVotersEnabled: editExternalVotersEnabled,
-                requiredVoterCount: editExternalVotersEnabled ? editRequiredVoterCount : 0,
-                deadlines: {
-                  finalVoteStartAt: editFinalVoteStartAt || null,
-                  finalVoteEndAt: editFinalVoteEndAt || null
-                }
-              })
+                requiredVoterCount: editExternalVotersEnabled ? editRequiredVoterCount : 0
+              } : {})
         })
       });
 
@@ -2401,11 +2357,6 @@ export default function App() {
       return;
     }
 
-    if (newRoomVoteStartTime && newRoomVoteEndTime && newRoomVoteEndTime <= newRoomVoteStartTime) {
-      triggerToast('2차 투표 예정 마감 일시는 시작 일시보다 뒤여야 합니다.', 'error');
-      return;
-    }
-
     const hostNick = newRoomHostNickname.trim().slice(0, 6) || nickname.slice(0, 6) || '방장';
     localStorage.setItem('why_not_room_nickname', hostNick);
     setNickname(hostNick);
@@ -2425,11 +2376,7 @@ export default function App() {
           requiredVoterCount: newRoomExternalVotersEnabled ? newRoomRequiredVoterCount : 0,
           isPublic: false,
           minResponseThreshold: 1,
-          eliminationConfig: { countPerRound: 1, tieBreak: 'random' },
-          deadlines: {
-            finalVoteStartAt: newRoomVoteStartTime || undefined,
-            finalVoteEndAt: newRoomVoteEndTime || undefined
-          }
+          eliminationConfig: { countPerRound: 1, tieBreak: 'random' }
         })
       });
       const createdRoom = await response.json().catch(() => null);
@@ -2453,8 +2400,6 @@ export default function App() {
       setNewRoomTitle('');
       setNewRoomDesc('');
       setNewRoomDecisionMode('STRUCTURED');
-      setNewRoomVoteStartTime('');
-      setNewRoomVoteEndTime('');
       setNewRoomExternalVotersEnabled(false);
       setNewRoomRequiredVoterCount(1);
 
@@ -5039,31 +4984,6 @@ export default function App() {
                           <span className="text-[10px] text-slate-500">최대 30명</span>
                         </div>
                       )}
-                    </div>
-
-                    {/* 2차 투표 예정 시간 (운영 참고용; 시스템 자동 마감 없음) */}
-                    <div className="space-y-2">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-                        <div className="space-y-1">
-                          <label className="text-xs font-bold text-slate-700">2차 투표 예정 시작 일시 (선택)</label>
-                          <input
-                            type="datetime-local"
-                            value={newRoomVoteStartTime}
-                            onChange={e => setNewRoomVoteStartTime(e.target.value)}
-                            className="w-full px-4 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium text-slate-700"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-xs font-bold text-slate-700">2차 투표 예정 마감 일시 (선택)</label>
-                          <input
-                            type="datetime-local"
-                            value={newRoomVoteEndTime}
-                            onChange={e => setNewRoomVoteEndTime(e.target.value)}
-                            className="w-full px-4 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium text-slate-700"
-                          />
-                        </div>
-                      </div>
-                      <p className="text-[10px] text-slate-500">예정 시간은 회의 운영을 위한 안내 값이며, 시간이 되었다고 시스템이 투표를 자동 시작하거나 마감하지 않습니다.</p>
                     </div>
 
                     <div className="flex gap-2 pt-2 justify-end">
@@ -9950,47 +9870,6 @@ export default function App() {
                 {roomDetails?.room.status !== 'IDEA_SUBMISSION' && (
                   <p className="text-[10px] text-slate-500">참여 인원·최종 선정 수·최소 정족수는 아이디어 등록 단계가 끝난 뒤에는 변경할 수 없습니다.</p>
                 )}
-
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
-                  <div>
-                    <h4 className="text-xs font-extrabold text-slate-900">2차 투표 예정 시간</h4>
-                    <p className="text-[10px] text-slate-500 mt-1">투표 시작 전에는 시작·마감 일시를 모두 수정할 수 있습니다. 시작 후에는 시작 일시는 고정되고 기존 마감 일시보다 뒤로 연장만 가능합니다. 예정 시간은 자동 시작·자동 마감 조건으로 사용되지 않습니다.</p>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-xs font-bold text-slate-700">예정 시작 일시</label>
-                      <input
-                        type="datetime-local"
-                        disabled={hasFinalVoteStarted(roomDetails?.room)}
-                        value={editFinalVoteStartAt}
-                        onChange={e => setEditFinalVoteStartAt(e.target.value)}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white disabled:bg-slate-100 disabled:text-slate-400"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-bold text-slate-700">예정 마감 일시</label>
-                      <input
-                        type="datetime-local"
-                        disabled={hasFinalVoteStarted(roomDetails?.room) && (
-                          roomDetails?.room.finalVoteStatus !== 'VOTING' ||
-                          !(roomDetails?.room.deadlines?.finalVoteEndAt || roomDetails?.room.deadlines?.evaluationAt)
-                        )}
-                        value={editFinalVoteEndAt}
-                        onChange={e => setEditFinalVoteEndAt(e.target.value)}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white disabled:bg-slate-100 disabled:text-slate-400"
-                      />
-                    </div>
-                  </div>
-                  {hasFinalVoteStarted(roomDetails?.room) && (
-                    <p className="text-[10px] font-bold text-rose-600">
-                      {roomDetails?.room.finalVoteStatus !== 'VOTING'
-                        ? '최종 투표 제출 단계가 끝나 예정 시간을 변경할 수 없습니다.'
-                        : (roomDetails?.room.deadlines?.finalVoteEndAt || roomDetails?.room.deadlines?.evaluationAt)
-                          ? '최종 투표가 시작되어 시작 일시는 고정되며, 기존 마감 일시보다 뒤로 연장만 가능합니다.'
-                          : '최종 투표 시작 전에 설정된 마감 일시가 없어 시작 후 새 마감 일시는 설정할 수 없습니다.'}
-                    </p>
-                  )}
-                </div>
 
                 <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 space-y-3">
                   {roomDetails?.room.finalVoteRosterLockedAt && (

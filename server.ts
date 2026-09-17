@@ -4536,66 +4536,7 @@ function normalizeRoomDeadlines(rawDeadlines: unknown): Room['deadlines'] {
     ? { ...(rawDeadlines as Record<string, unknown>) }
     : {};
   const normalized = source as Room['deadlines'];
-  if (!normalized.finalVoteStartAt && typeof source.voteStartTime === 'string') {
-    normalized.finalVoteStartAt = source.voteStartTime;
-  }
-  if (!normalized.finalVoteEndAt && typeof source.evaluationAt === 'string') {
-    normalized.finalVoteEndAt = source.evaluationAt;
-  }
   return normalized;
-}
-
-function normalizeFinalVoteScheduleValue(value: unknown, label: string): string | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value !== 'string' || value.trim().length > 64) {
-    throw new Error(`${label} 형식이 올바르지 않습니다.`);
-  }
-  const normalized = value.trim();
-  if (Number.isNaN(Date.parse(normalized))) {
-    throw new Error(`${label} 형식이 올바르지 않습니다.`);
-  }
-  return normalized;
-}
-
-function buildFinalVoteScheduleDeadlines(rawDeadlines: unknown, baseDeadlines?: Room['deadlines']): Room['deadlines'] {
-  const incoming = rawDeadlines && typeof rawDeadlines === 'object' && !Array.isArray(rawDeadlines)
-    ? rawDeadlines as Record<string, unknown>
-    : {};
-  const next = normalizeRoomDeadlines(baseDeadlines || {});
-  const hasStart = Object.prototype.hasOwnProperty.call(incoming, 'finalVoteStartAt') ||
-    Object.prototype.hasOwnProperty.call(incoming, 'voteStartTime');
-  const hasEnd = Object.prototype.hasOwnProperty.call(incoming, 'finalVoteEndAt') ||
-    Object.prototype.hasOwnProperty.call(incoming, 'evaluationAt');
-
-  if (hasStart) {
-    const start = normalizeFinalVoteScheduleValue(
-      incoming.finalVoteStartAt ?? incoming.voteStartTime,
-      '2차 투표 예정 시작 일시'
-    );
-    if (start) next.finalVoteStartAt = start;
-    else delete next.finalVoteStartAt;
-    delete next.voteStartTime;
-  }
-  if (hasEnd) {
-    const end = normalizeFinalVoteScheduleValue(
-      incoming.finalVoteEndAt ?? incoming.evaluationAt,
-      '2차 투표 예정 마감 일시'
-    );
-    if (end) next.finalVoteEndAt = end;
-    else delete next.finalVoteEndAt;
-    // V11 used evaluationAt for the final-vote end time. Once V12 explicitly
-    // writes the schedule, remove that ambiguous legacy key.
-    delete next.evaluationAt;
-  }
-
-  if (next.finalVoteStartAt && next.finalVoteEndAt) {
-    const startMs = Date.parse(next.finalVoteStartAt);
-    const endMs = Date.parse(next.finalVoteEndAt);
-    if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs <= startMs) {
-      throw new Error('2차 투표 예정 마감 일시는 시작 일시보다 뒤여야 합니다.');
-    }
-  }
-  return next;
 }
 
 function hasFinalVoteStartedServer(room: Room): boolean {
@@ -6594,7 +6535,7 @@ app.get('/api/rooms', async (req: AuthenticatedRequest, res) => {
  */
 app.post('/api/rooms', async (req: AuthenticatedRequest, res) => {
   const {
-    title, description, minResponseThreshold, eliminationConfig, deadlines, category,
+    title, description, minResponseThreshold, eliminationConfig, category,
     maxParticipants, targetWinnerCount, decisionMode, externalVotersEnabled, requiredVoterCount
   } = req.body;
 
@@ -6606,13 +6547,6 @@ app.post('/api/rooms', async (req: AuthenticatedRequest, res) => {
   }
   if (category !== undefined && category !== '기획' && category !== '디자인') {
     return res.status(400).json({ error: '지원하지 않는 회의실 분류입니다.' });
-  }
-
-  let normalizedDeadlines: Room['deadlines'];
-  try {
-    normalizedDeadlines = buildFinalVoteScheduleDeadlines(deadlines || {});
-  } catch (error) {
-    return res.status(400).json({ error: error instanceof Error ? error.message : '2차 투표 예정 시간 형식이 올바르지 않습니다.' });
   }
 
   const normalizedDecisionMode: DecisionMode = decisionMode === 'QUICK' ? 'QUICK' : 'STRUCTURED';
@@ -6651,7 +6585,7 @@ app.post('/api/rooms', async (req: AuthenticatedRequest, res) => {
       ratioPerRound: eliminationConfig?.ratioPerRound,
       tieBreak: eliminationConfig?.tieBreak || 'random',
     },
-    deadlines: normalizedDeadlines,
+    deadlines: {},
     createdAt: createdAt.toISOString(),
     engineVersion: normalizedDecisionMode === 'STRUCTURED' ? 8 : 7,
     decisionMode: normalizedDecisionMode,
@@ -6815,7 +6749,7 @@ app.patch('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
 
   const {
     title, description, category, maxParticipants, targetWinnerCount, minResponseThreshold,
-    externalVotersEnabled, requiredVoterCount, deadlines
+    externalVotersEnabled, requiredVoterCount
   } = req.body;
 
   if (title !== undefined && (typeof title !== 'string' || !title.trim() || title.length > 120)) {
@@ -6826,39 +6760,6 @@ app.patch('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
   }
   if (category !== undefined && category !== '기획' && category !== '디자인') {
     return res.status(400).json({ error: '지원하지 않는 회의실 분류입니다.' });
-  }
-
-  const incomingDeadlines = deadlines && typeof deadlines === 'object' && !Array.isArray(deadlines)
-    ? deadlines as Record<string, unknown>
-    : null;
-  const changesFinalVoteSchedule = Boolean(
-    incomingDeadlines && (
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'finalVoteStartAt') ||
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'finalVoteEndAt') ||
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'voteStartTime') ||
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'evaluationAt')
-    )
-  );
-  const changesFinalVoteStart = Boolean(
-    incomingDeadlines && (
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'finalVoteStartAt') ||
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'voteStartTime')
-    )
-  );
-  const changesFinalVoteEnd = Boolean(
-    incomingDeadlines && (
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'finalVoteEndAt') ||
-      Object.prototype.hasOwnProperty.call(incomingDeadlines, 'evaluationAt')
-    )
-  );
-  const finalVoteStarted = hasFinalVoteStartedServer(room);
-  const extendsFinalVoteEndAfterStart = finalVoteStarted && changesFinalVoteEnd;
-
-  if (finalVoteStarted && changesFinalVoteStart) {
-    return res.status(409).json({ error: '최종 투표가 시작된 뒤에는 2차 투표 예정 시작 일시를 변경할 수 없습니다.' });
-  }
-  if (extendsFinalVoteEndAfterStart && room.finalVoteStatus !== 'VOTING') {
-    return res.status(409).json({ error: '최종 투표 제출 단계가 끝난 뒤에는 2차 투표 예정 마감 일시를 변경할 수 없습니다.' });
   }
 
   const changesDecisionRules =
@@ -6908,33 +6809,6 @@ app.patch('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
   } else {
     updatedRoom.requiredVoterCount = 0;
   }
-  if (changesFinalVoteSchedule && incomingDeadlines) {
-    try {
-      updatedRoom.deadlines = buildFinalVoteScheduleDeadlines(incomingDeadlines, room.deadlines);
-    } catch (error) {
-      return res.status(400).json({ error: error instanceof Error ? error.message : '2차 투표 예정 시간 형식이 올바르지 않습니다.' });
-    }
-
-    if (extendsFinalVoteEndAfterStart) {
-      const currentDeadlines = normalizeRoomDeadlines(room.deadlines);
-      const currentEnd = currentDeadlines.finalVoteEndAt;
-      const requestedEnd = updatedRoom.deadlines?.finalVoteEndAt;
-      const currentEndMs = currentEnd ? Date.parse(currentEnd) : Number.NaN;
-      const requestedEndMs = requestedEnd ? Date.parse(requestedEnd) : Number.NaN;
-
-      if (!currentEnd || !requestedEnd || Number.isNaN(currentEndMs) || Number.isNaN(requestedEndMs)) {
-        return res.status(409).json({
-          error: '최종 투표가 시작된 뒤에는 시작 전에 설정된 기존 마감 일시를 뒤로 연장하는 경우에만 변경할 수 있습니다.'
-        });
-      }
-      if (requestedEndMs <= currentEndMs) {
-        return res.status(409).json({
-          error: '최종 투표가 시작된 뒤에는 예정 마감 일시를 기존보다 뒤로 연장하는 경우에만 변경할 수 있습니다.'
-        });
-      }
-    }
-  }
-
   if (SUPABASE_CONFIGURED && updatedRoom.externalVotersEnabled &&
       (externalVotersEnabled !== undefined || requiredVoterCount !== undefined)) {
     const currentSetup = await loadVoterSetupState(room);
@@ -6965,23 +6839,6 @@ app.patch('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
       required_voter_count: updatedRoom.requiredVoterCount,
       deadlines: updatedRoom.deadlines
     }).eq('id', id).eq('host_id', reqUserId);
-    if (changesFinalVoteSchedule) {
-      // Use the room state version as an optimistic concurrency guard so two
-      // simultaneous settings saves cannot overwrite a newer schedule.
-      updateQuery = updateQuery.eq('state_version', Number(room.stateVersion || 1));
-
-      if (extendsFinalVoteEndAfterStart) {
-        // After actual voting starts, only the validated deadline extension is allowed.
-        // If the vote leaves VOTING before this write, the update safely affects zero rows.
-        updateQuery = updateQuery.eq('final_vote_status', 'VOTING');
-      } else {
-        // Before voting starts, prevent a stale settings modal from overwriting a newly locked schedule.
-        updateQuery = updateQuery
-          .is('final_vote_roster_locked_at', null)
-          .eq('final_vote_status', 'NOT_STARTED')
-          .is('current_final_vote_cycle_id', null);
-      }
-    }
     const { data: changedRows, error } = await updateQuery.select('id');
     if (error) {
       if (/참여자와 예약 좌석|예약 좌석.*최대 참여/i.test(error.message || '')) {
@@ -6991,11 +6848,7 @@ app.patch('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
     }
     if (!changedRows || changedRows.length !== 1) {
       return res.status(409).json({
-        error: changesFinalVoteSchedule
-          ? extendsFinalVoteEndAfterStart
-            ? '최종 투표 상태 또는 예정 마감 일시가 다른 요청에서 변경되어 연장하지 못했습니다. 새로고침해 주세요.'
-            : '최종 투표가 이미 시작되었거나 회의실 상태가 변경되어 예정 시간을 저장하지 못했습니다. 새로고침해 주세요.'
-          : '회의실이 다른 요청에서 변경되거나 삭제되었습니다. 새로고침해 주세요.'
+        error: '회의실이 다른 요청에서 변경되거나 삭제되었습니다. 새로고침해 주세요.'
       });
     }
   } else if (IS_PRODUCTION) {
