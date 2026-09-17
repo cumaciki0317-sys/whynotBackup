@@ -4229,6 +4229,21 @@ app.post('/api/account-invites/participants/:inviteId/respond', async (req: Auth
     if (response !== 'ACCEPT' && response !== 'DECLINE') {
       return res.status(400).json({ error: '초대 수락 또는 거절을 선택해 주세요.' });
     }
+    if (response === 'ACCEPT') {
+      const { data: inviteRow, error: inviteError } = await supabase
+        .from('room_account_invites')
+        .select('room_id')
+        .eq('id', req.params.inviteId)
+        .eq('invited_user_id', req.auth!.userId)
+        .eq('invite_role', 'VOTER')
+        .maybeSingle();
+      if (inviteError) return res.status(503).json({ error: '투표자 초대 상태를 확인하지 못했습니다.' });
+      if (!inviteRow) return res.status(404).json({ error: '처리할 투표자 초대를 찾을 수 없습니다.' });
+      const room = await hydrateRoomFromSupabase(String(inviteRow.room_id));
+      if (!room || !isFinalVotePreparationStage(room)) {
+        return res.status(409).json({ error: '외부 투표자는 최종 별 투표 준비 단계에서만 초대를 수락할 수 있습니다.' });
+      }
+    }
     const roomNickname = response === 'ACCEPT' ? normalizeRoomNickname(req.body?.nickname) : null;
     if (response === 'ACCEPT' && !roomNickname) {
       return res.status(400).json({ error: '입장할 닉네임을 1~6자로 입력해 주세요.' });
@@ -4546,6 +4561,13 @@ function hasFinalVoteStartedServer(room: Room): boolean {
     room.status === 'CLOSED' ||
     (room.finalVoteStatus && room.finalVoteStatus !== 'NOT_STARTED')
   );
+}
+
+function isFinalVotePreparationStage(room: Room): boolean {
+  return room.status === 'ELIMINATION' &&
+    (room.finalVoteStatus || 'NOT_STARTED') === 'NOT_STARTED' &&
+    !room.finalVoteRosterLockedAt &&
+    !room.currentFinalVoteCycleId;
 }
 
 function mapRoomRow(row: any): Room {
@@ -5015,10 +5037,12 @@ app.delete('/api/rooms/:id/leave', async (req: AuthenticatedRequest, res) => {
 app.delete('/api/rooms/:id/voter-registration', async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const userId = req.auth!.userId;
+  const currentRoom = await hydrateRoomFromSupabase(id);
+  if (!currentRoom) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+  if (!isFinalVotePreparationStage(currentRoom)) {
+    return res.status(409).json({ error: '외부 투표자 등록은 최종 별 투표 준비 단계에서만 취소할 수 있습니다.' });
+  }
   if (!SUPABASE_CONFIGURED) {
-    const room = rooms.get(id);
-    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
-    if (hasFinalVoteStartedServer(room)) return res.status(409).json({ error: '최종 투표가 시작된 뒤에는 투표자 등록을 취소할 수 없습니다.' });
     if (participantRolesMap.get(id)?.get(userId) !== 'VOTER') return res.status(409).json({ error: '취소할 투표자 등록을 찾을 수 없습니다.' });
     participantRolesMap.get(id)?.delete(userId);
     participants.get(id)?.delete(userId);
@@ -5074,6 +5098,9 @@ app.post('/api/rooms/:id/invites', async (req: AuthenticatedRequest, res) => {
   }
   if (inviteType === 'VOTER' && room && (!room.externalVotersEnabled || !room.requiredVoterCount)) {
     return res.status(409).json({ error: '외부 투표자 사용을 먼저 활성화하고 필요 인원을 설정해 주세요.' });
+  }
+  if (inviteType === 'VOTER' && room && !isFinalVotePreparationStage(room)) {
+    return res.status(409).json({ error: '외부 투표자는 최종 후보가 확정된 최종 별 투표 준비 단계에서만 초대할 수 있습니다.' });
   }
   if (inviteType === 'VOTER' && room?.finalVoteRosterLockedAt) {
     return res.status(409).json({ error: '최종 투표가 시작되어 새 투표자를 초대할 수 없습니다.' });
@@ -5147,6 +5174,13 @@ app.delete('/api/rooms/:id/invites', async (req, res) => {
     : req.query.inviteType === 'PARTICIPANT' || req.body?.inviteType === 'PARTICIPANT'
       ? 'PARTICIPANT'
       : null;
+  if (inviteType === 'VOTER') {
+    const room = await hydrateRoomFromSupabase(id);
+    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (!isFinalVotePreparationStage(room)) {
+      return res.status(409).json({ error: '외부 투표자 초대 링크는 최종 별 투표 준비 단계에서만 변경할 수 있습니다.' });
+    }
+  }
   if (SUPABASE_CONFIGURED) {
     try {
       const { error } = await supabase
@@ -5204,6 +5238,13 @@ app.post('/api/rooms/:id/account-invites', async (req: AuthenticatedRequest, res
   if (!SUPABASE_CONFIGURED) {
     return res.status(503).json({ error: '계정 초대 저장소가 연결되지 않았습니다.' });
   }
+  if (role === 'VOTER') {
+    const room = await hydrateRoomFromSupabase(req.params.id);
+    if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+    if (!isFinalVotePreparationStage(room)) {
+      return res.status(409).json({ error: '외부 투표자는 최종 후보가 확정된 최종 별 투표 준비 단계에서만 초대할 수 있습니다.' });
+    }
+  }
   const { data, error } = await supabase.rpc('create_room_account_invite_v9', {
     p_room_id: req.params.id,
     p_host_user_id: req.auth!.userId,
@@ -5222,6 +5263,19 @@ app.post('/api/rooms/:id/account-invites', async (req: AuthenticatedRequest, res
 
 app.delete('/api/rooms/:id/account-invites/:inviteId', async (req: AuthenticatedRequest, res) => {
   if (!SUPABASE_CONFIGURED) return res.status(503).json({ error: '계정 초대 저장소가 연결되지 않았습니다.' });
+  const { data: inviteRow, error: inviteLoadError } = await supabase
+    .from('room_account_invites')
+    .select('invite_role')
+    .eq('id', req.params.inviteId)
+    .eq('room_id', req.params.id)
+    .maybeSingle();
+  if (inviteLoadError) return res.status(503).json({ error: '계정 초대 상태를 확인하지 못했습니다.' });
+  if (inviteRow?.invite_role === 'VOTER') {
+    const room = await hydrateRoomFromSupabase(req.params.id);
+    if (!room || !isFinalVotePreparationStage(room)) {
+      return res.status(409).json({ error: '외부 투표자 초대는 최종 별 투표 준비 단계에서만 취소할 수 있습니다.' });
+    }
+  }
   const { data, error } = await supabase.rpc('cancel_room_account_invite_v10', {
     p_room_id: req.params.id,
     p_host_user_id: req.auth!.userId,
@@ -5233,6 +5287,11 @@ app.delete('/api/rooms/:id/account-invites/:inviteId', async (req: Authenticated
 
 app.delete('/api/rooms/:id/voters/:voterUserId', async (req: AuthenticatedRequest, res) => {
   if (!SUPABASE_CONFIGURED) return res.status(503).json({ error: '외부 투표자 저장소가 연결되지 않았습니다.' });
+  const room = await hydrateRoomFromSupabase(req.params.id);
+  if (!room) return res.status(404).json({ error: '방을 찾을 수 없습니다.' });
+  if (!isFinalVotePreparationStage(room)) {
+    return res.status(409).json({ error: '외부 투표자 등록은 최종 별 투표 준비 단계에서만 변경할 수 있습니다.' });
+  }
   const { data, error } = await supabase.rpc('cancel_room_voter_registration_v9', {
     p_room_id: req.params.id,
     p_host_user_id: req.auth!.userId,
@@ -5318,7 +5377,9 @@ app.get('/api/invites/:token', async (req, res) => {
     });
   }
 
-  if (inv.inviteType === 'VOTER' && (!room.externalVotersEnabled || room.finalVoteRosterLockedAt)) {
+  if (inv.inviteType === 'VOTER' && (
+    !room.externalVotersEnabled || !isFinalVotePreparationStage(room)
+  )) {
     return res.json({
       isValid: false,
       errorCode: 'VOTER_REGISTRATION_CLOSED',
@@ -5446,6 +5507,9 @@ app.post('/api/invites/:token/join', async (req: AuthenticatedRequest, res) => {
 
   if (!room) {
     return res.status(404).json({ error: '삭제된 회의실입니다.' });
+  }
+  if (inv.inviteType === 'VOTER' && !isFinalVotePreparationStage(room as Room)) {
+    return res.status(409).json({ error: '외부 투표자는 최종 별 투표 준비 단계에서만 등록할 수 있습니다.' });
   }
 
   if (!SUPABASE_CONFIGURED && room.status === 'CLOSED') {
@@ -6536,7 +6600,7 @@ app.get('/api/rooms', async (req: AuthenticatedRequest, res) => {
 app.post('/api/rooms', async (req: AuthenticatedRequest, res) => {
   const {
     title, description, minResponseThreshold, eliminationConfig, category,
-    maxParticipants, targetWinnerCount, decisionMode, externalVotersEnabled, requiredVoterCount
+    maxParticipants, targetWinnerCount, decisionMode
   } = req.body;
 
   if (typeof title !== 'string' || !title.trim() || title.trim().length > 120) {
@@ -6551,20 +6615,12 @@ app.post('/api/rooms', async (req: AuthenticatedRequest, res) => {
 
   const normalizedDecisionMode: DecisionMode = decisionMode === 'QUICK' ? 'QUICK' : 'STRUCTURED';
   const normalizedMaxParticipants = Math.min(Math.max(Math.trunc(Number(maxParticipants)) || 4, 2), 6);
-  const normalizedExternalVotersEnabled = externalVotersEnabled === true;
-  const normalizedRequiredVoterCount = normalizedExternalVotersEnabled
-    ? Math.min(30, Math.max(1, Math.trunc(Number(requiredVoterCount)) || 1))
-    : 0;
+  const normalizedExternalVotersEnabled = false;
+  const normalizedRequiredVoterCount = 0;
   const newId = `room-${crypto.randomUUID()}`;
   const createdAt = new Date();
   const participantInviteToken = `inv_${crypto.randomBytes(32).toString('base64url')}`;
   const participantInviteExpiresAt = new Date(createdAt.getTime() + 3 * 60 * 1000).toISOString();
-  const voterInviteToken = normalizedExternalVotersEnabled
-    ? `inv_${crypto.randomBytes(32).toString('base64url')}`
-    : null;
-  const voterInviteExpiresAt = normalizedExternalVotersEnabled
-    ? new Date(createdAt.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString()
-    : null;
   const newRoom: RefinementAwareRoom = {
     id: newId,
     title: title.trim(),
@@ -6617,8 +6673,6 @@ app.post('/api/rooms', async (req: AuthenticatedRequest, res) => {
       required_voter_count: newRoom.requiredVoterCount,
       participant_invite_token_hash: hashOpaqueSecret(participantInviteToken),
       participant_invite_expires_at: participantInviteExpiresAt,
-      voter_invite_token_hash: voterInviteToken ? hashOpaqueSecret(voterInviteToken) : null,
-      voter_invite_expires_at: voterInviteExpiresAt,
       refinement_enabled: newRoom.refinementEnabled,
       max_refinement_rounds: newRoom.maxRefinementRounds
     };
@@ -6656,18 +6710,6 @@ app.post('/api/rooms', async (req: AuthenticatedRequest, res) => {
     createdAt: createdAt.toISOString(),
     inviteType: 'PARTICIPANT'
   }];
-  if (voterInviteToken && voterInviteExpiresAt) {
-    initialInvites.push({
-      id: `invite-${crypto.randomUUID()}`,
-      roomId: newId,
-      inviteToken: voterInviteToken,
-      createdBy: newRoom.hostId,
-      expiresAt: voterInviteExpiresAt,
-      isActive: true,
-      createdAt: createdAt.toISOString(),
-      inviteType: 'VOTER'
-    });
-  }
   initialInvites.forEach(invite => roomInvites.set(invite.inviteToken, invite));
 
   const initialDetails = {
@@ -6771,9 +6813,9 @@ app.patch('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
   }
   if (
     (externalVotersEnabled !== undefined || requiredVoterCount !== undefined) &&
-    hasFinalVoteStartedServer(room)
+    !isFinalVotePreparationStage(room)
   ) {
-    return res.status(409).json({ error: '최종 투표가 시작된 뒤에는 외부 투표자 설정을 변경할 수 없습니다.' });
+    return res.status(409).json({ error: '외부 투표자 설정은 최종 후보가 확정된 최종 별 투표 준비 단계에서만 변경할 수 있습니다.' });
   }
 
   const updatedRoom: Room = { ...room };
