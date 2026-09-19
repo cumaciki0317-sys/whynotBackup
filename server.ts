@@ -11,6 +11,7 @@ import {
   Room,
   RoomStatus,
   Idea,
+  IdeaAttachment,
   CriterionProposal,
   Criterion,
   Evaluation,
@@ -31,8 +32,14 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const SUPABASE_CONFIGURED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
-const IDEA_PDF_BUCKET = 'idea-pdfs';
-const MAX_IDEA_PDF_BYTES = 10 * 1024 * 1024;
+const IDEA_REFERENCE_BUCKET = 'idea-pdfs';
+const MAX_IDEA_REFERENCE_BYTES = 10 * 1024 * 1024;
+const IDEA_REFERENCE_TYPES: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg'
+};
 
 if (IS_PRODUCTION && (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)) {
   throw new Error(
@@ -4229,21 +4236,6 @@ app.post('/api/account-invites/participants/:inviteId/respond', async (req: Auth
     if (response !== 'ACCEPT' && response !== 'DECLINE') {
       return res.status(400).json({ error: '초대 수락 또는 거절을 선택해 주세요.' });
     }
-    if (response === 'ACCEPT') {
-      const { data: inviteRow, error: inviteError } = await supabase
-        .from('room_account_invites')
-        .select('room_id')
-        .eq('id', req.params.inviteId)
-        .eq('invited_user_id', req.auth!.userId)
-        .eq('invite_role', 'VOTER')
-        .maybeSingle();
-      if (inviteError) return res.status(503).json({ error: '투표자 초대 상태를 확인하지 못했습니다.' });
-      if (!inviteRow) return res.status(404).json({ error: '처리할 투표자 초대를 찾을 수 없습니다.' });
-      const room = await hydrateRoomFromSupabase(String(inviteRow.room_id));
-      if (!room || !isFinalVotePreparationStage(room)) {
-        return res.status(409).json({ error: '외부 투표자는 최종 별 투표 준비 단계에서만 초대를 수락할 수 있습니다.' });
-      }
-    }
     const roomNickname = response === 'ACCEPT' ? normalizeRoomNickname(req.body?.nickname) : null;
     if (response === 'ACCEPT' && !roomNickname) {
       return res.status(400).json({ error: '입장할 닉네임을 1~6자로 입력해 주세요.' });
@@ -4717,7 +4709,8 @@ async function hydrateRoomFromSupabase(roomId: string): Promise<Room | null> {
       : Promise.resolve({ data: [], error: null }),
     loadsEvaluationData
       ? supabase.from('evaluations').select('*').eq('room_id', roomId)
-      : Promise.resolve({ data: [], error: null })
+      : Promise.resolve({ data: [], error: null }),
+    supabase.from('idea_attachments').select('*').eq('room_id', roomId).order('created_at', { ascending: true })
   ]), 3500);
   const failedDetail = detailResults.find(result => result.error);
   if (failedDetail?.error) {
@@ -4728,8 +4721,26 @@ async function hydrateRoomFromSupabase(roomId: string): Promise<Room | null> {
     { data: participantRows },
     { data: criterionRows },
     { data: proposalRows },
-    { data: evaluationRows }
+    { data: evaluationRows },
+    { data: attachmentRows }
   ] = detailResults;
+
+  const attachmentsByIdea = new Map<string, IdeaAttachment[]>();
+  if (Array.isArray(attachmentRows)) {
+    attachmentRows.forEach((row: any) => {
+      const attachment: IdeaAttachment = {
+        id: String(row.id),
+        roomId: String(row.room_id),
+        ideaId: String(row.idea_id),
+        storagePath: String(row.storage_path),
+        originalName: String(row.original_name),
+        mimeType: row.mime_type,
+        fileSize: Number(row.file_size),
+        createdAt: row.created_at || undefined
+      };
+      attachmentsByIdea.set(attachment.ideaId, [...(attachmentsByIdea.get(attachment.ideaId) || []), attachment]);
+    });
+  }
 
   rooms.set(roomId, room);
   roomDecisionModesMap.set(roomId, room.decisionMode || 'STRUCTURED');
@@ -4748,6 +4759,16 @@ async function hydrateRoomFromSupabase(roomId: string): Promise<Room | null> {
         pdfAttachmentPath: row.pdf_attachment_path || undefined,
         pdfAttachmentName: row.pdf_attachment_name || undefined,
         pdfAttachmentSize: row.pdf_attachment_size !== null && row.pdf_attachment_size !== undefined ? Number(row.pdf_attachment_size) : undefined,
+        attachments: attachmentsByIdea.get(String(row.id)) || (row.pdf_attachment_path ? [{
+          id: `legacy:${row.id}`,
+          roomId: String(row.room_id),
+          ideaId: String(row.id),
+          storagePath: String(row.pdf_attachment_path),
+          originalName: row.pdf_attachment_name || '참고 자료.pdf',
+          mimeType: /\.png$/i.test(row.pdf_attachment_path) ? 'image/png' : /\.jpe?g$/i.test(row.pdf_attachment_path) ? 'image/jpeg' : 'application/pdf',
+          fileSize: Number(row.pdf_attachment_size || 0),
+          legacy: true
+        }] : []),
         tags: row.tags || [],
         status: row.status || 'ACTIVE',
         eliminatedRound: row.eliminated_round || undefined,
@@ -5759,10 +5780,12 @@ app.post('/api/rooms/:id/status', async (req: AuthenticatedRequest, res) => {
 // - Direct browser -> Supabase signed upload (avoids Vercel request body limits)
 // - Server verifies ownership, phase, public link policy, object existence and PDF magic
 // =============================================================================
-function sanitizeIdeaPdfDisplayName(value: unknown): string {
-  if (typeof value !== 'string') throw new Error('PDF 파일 이름이 올바르지 않습니다.');
+function sanitizeIdeaReferenceDisplayName(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('참고 자료 파일 이름이 올바르지 않습니다.');
   const base = path.basename(value.trim()).normalize('NFKC').replace(/[\u0000-\u001F\u007F]/g, '').trim();
-  if (!base || base.length > 180 || !/\.pdf$/i.test(base)) throw new Error('PDF 파일만 첨부할 수 있습니다.');
+  if (!base || base.length > 180 || !IDEA_REFERENCE_TYPES[path.extname(base).toLowerCase()]) {
+    throw new Error('PDF, PNG, JPG 파일만 첨부할 수 있습니다.');
+  }
   return base;
 }
 
@@ -5770,14 +5793,14 @@ async function cleanupIdeaPdfFolder(roomId: string, ideaId: string, keepPath?: s
   if (!SUPABASE_CONFIGURED) return;
   try {
     const folder = `${roomId}/${ideaId}`;
-    const { data, error } = await supabase.storage.from(IDEA_PDF_BUCKET).list(folder, { limit: 100 });
+    const { data, error } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).list(folder, { limit: 100 });
     if (error) throw error;
     const targets = (data || [])
       .filter(item => item?.name)
       .map(item => `${folder}/${item.name}`)
       .filter(objectPath => objectPath !== keepPath);
     if (targets.length > 0) {
-      const { error: removeError } = await supabase.storage.from(IDEA_PDF_BUCKET).remove(targets);
+      const { error: removeError } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove(targets);
       if (removeError) throw removeError;
     }
   } catch (error) {
@@ -5799,59 +5822,70 @@ async function loadPdfIdeaForOwner(roomId: string, ideaId: string, userId: strin
   return { room, idea };
 }
 
-app.post('/api/rooms/:id/ideas/:ideaId/pdf/upload-ticket', async (req: AuthenticatedRequest, res) => {
+app.post('/api/rooms/:id/ideas/:ideaId/attachments/upload-ticket', async (req: AuthenticatedRequest, res) => {
   const { id, ideaId } = req.params;
   const userId = req.auth!.userId;
-  if (!SUPABASE_CONFIGURED) return res.status(503).json({ error: 'PDF 첨부는 Supabase 연결 환경에서만 사용할 수 있습니다.' });
+  if (!SUPABASE_CONFIGURED) return res.status(503).json({ error: '참고 자료 첨부는 Supabase 연결 환경에서만 사용할 수 있습니다.' });
   const loaded = await loadPdfIdeaForOwner(id, ideaId, userId);
   if ('error' in loaded) return res.status(loaded.status).json({ error: loaded.error });
+  const { count: attachmentCount, error: countError } = await supabase
+    .from('idea_attachments')
+    .select('id', { count: 'exact', head: true })
+    .eq('room_id', id)
+    .eq('idea_id', ideaId);
+  if (countError) return res.status(503).json({ error: '참고 자료 개수를 확인하지 못했습니다.' });
+  if ((attachmentCount || 0) >= 3) return res.status(409).json({ error: '참고 자료는 아이디어당 최대 3개까지 첨부할 수 있습니다.' });
 
   let fileName: string;
-  try { fileName = sanitizeIdeaPdfDisplayName(req.body?.fileName); }
-  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : 'PDF 파일 이름이 올바르지 않습니다.' }); }
+  try { fileName = sanitizeIdeaReferenceDisplayName(req.body?.fileName); }
+  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : '참고 자료 파일 이름이 올바르지 않습니다.' }); }
   const fileSize = Number(req.body?.fileSize || 0);
   const mimeType = String(req.body?.mimeType || '').toLowerCase();
-  if (!Number.isInteger(fileSize) || fileSize <= 0 || fileSize > MAX_IDEA_PDF_BYTES) {
-    return res.status(400).json({ error: 'PDF 파일은 10MB 이하만 첨부할 수 있습니다.' });
+  if (!Number.isInteger(fileSize) || fileSize <= 0 || fileSize > MAX_IDEA_REFERENCE_BYTES) {
+    return res.status(400).json({ error: '참고 자료는 10MB 이하만 첨부할 수 있습니다.' });
   }
-  if (mimeType !== 'application/pdf') return res.status(400).json({ error: 'PDF 파일만 첨부할 수 있습니다.' });
+  const extension = path.extname(fileName).toLowerCase();
+  if (IDEA_REFERENCE_TYPES[extension] !== mimeType) {
+    return res.status(400).json({ error: '파일 확장자와 MIME 형식이 일치하지 않습니다.' });
+  }
 
-  await cleanupIdeaPdfFolder(id, ideaId, loaded.idea.pdfAttachmentPath);
-  const objectPath = `${id}/${ideaId}/pending-${crypto.randomUUID()}.pdf`;
-  const { data, error } = await supabase.storage.from(IDEA_PDF_BUCKET).createSignedUploadUrl(objectPath);
+  const objectPath = `${id}/${ideaId}/pending-${crypto.randomUUID()}${extension}`;
+  const { data, error } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).createSignedUploadUrl(objectPath);
   if (error || !data?.signedUrl || !data?.token) {
-    return res.status(503).json({ error: 'PDF 업로드 주소를 만들지 못했습니다.' });
+    return res.status(503).json({ error: '참고 자료 업로드 주소를 만들지 못했습니다.' });
   }
   return res.json({ signedUrl: data.signedUrl, token: data.token, path: objectPath, fileName, fileSize });
 });
 
-app.post('/api/rooms/:id/ideas/:ideaId/pdf/finalize', async (req: AuthenticatedRequest, res) => {
+app.post('/api/rooms/:id/ideas/:ideaId/attachments/finalize', async (req: AuthenticatedRequest, res) => {
   const { id, ideaId } = req.params;
   const userId = req.auth!.userId;
-  if (!SUPABASE_CONFIGURED) return res.status(503).json({ error: 'PDF 첨부는 Supabase 연결 환경에서만 사용할 수 있습니다.' });
+  if (!SUPABASE_CONFIGURED) return res.status(503).json({ error: '참고 자료 첨부는 Supabase 연결 환경에서만 사용할 수 있습니다.' });
   const loaded = await loadPdfIdeaForOwner(id, ideaId, userId);
   if ('error' in loaded) return res.status(loaded.status).json({ error: loaded.error });
 
   const objectPath = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
   const expectedPrefix = `${id}/${ideaId}/pending-`;
   const pendingObjectName = objectPath.startsWith(expectedPrefix) ? objectPath.slice(expectedPrefix.length) : '';
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.pdf$/i.test(pendingObjectName)) {
-    return res.status(400).json({ error: 'PDF 업로드 경로가 올바르지 않습니다.' });
-  }
   let fileName: string;
-  try { fileName = sanitizeIdeaPdfDisplayName(req.body?.fileName); }
-  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : 'PDF 파일 이름이 올바르지 않습니다.' }); }
+  try { fileName = sanitizeIdeaReferenceDisplayName(req.body?.fileName); }
+  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : '참고 자료 파일 이름이 올바르지 않습니다.' }); }
+  const extension = path.extname(fileName).toLowerCase();
+  const expectedMimeType = IDEA_REFERENCE_TYPES[extension];
+  if (!pendingObjectName.endsWith(extension) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(pdf|png|jpe?g)$/i.test(pendingObjectName)) {
+    return res.status(400).json({ error: '참고 자료 업로드 경로가 올바르지 않습니다.' });
+  }
   const fileSize = Number(req.body?.fileSize || 0);
-  if (!Number.isInteger(fileSize) || fileSize <= 0 || fileSize > MAX_IDEA_PDF_BYTES) {
-    return res.status(400).json({ error: 'PDF 파일은 10MB 이하만 첨부할 수 있습니다.' });
+  if (!Number.isInteger(fileSize) || fileSize <= 0 || fileSize > MAX_IDEA_REFERENCE_BYTES) {
+    return res.status(400).json({ error: '참고 자료는 10MB 이하만 첨부할 수 있습니다.' });
   }
 
-  const { data: info, error: infoError } = await supabase.storage.from(IDEA_PDF_BUCKET).info(objectPath);
-  if (infoError || !info) return res.status(400).json({ error: '업로드된 PDF 파일을 확인하지 못했습니다.' });
+  const { data: info, error: infoError } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).info(objectPath);
+  if (infoError || !info) return res.status(400).json({ error: '업로드된 참고 자료를 확인하지 못했습니다.' });
   const storedSize = Number((info as any)?.size ?? (info as any)?.metadata?.size);
-  if (!Number.isInteger(storedSize) || storedSize <= 0 || storedSize > MAX_IDEA_PDF_BYTES || storedSize !== fileSize) {
-    await supabase.storage.from(IDEA_PDF_BUCKET).remove([objectPath]);
-    return res.status(400).json({ error: '업로드된 PDF 파일 크기가 요청 정보와 일치하지 않습니다.' });
+  if (!Number.isInteger(storedSize) || storedSize <= 0 || storedSize > MAX_IDEA_REFERENCE_BYTES || storedSize !== fileSize) {
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(400).json({ error: '업로드된 참고 자료 크기가 요청 정보와 일치하지 않습니다.' });
   }
 
   const infoContentType = String(
@@ -5862,56 +5896,72 @@ app.post('/api/rooms/:id/ideas/:ideaId/pdf/finalize', async (req: AuthenticatedR
     ''
   ).split(';')[0].trim().toLowerCase();
 
-  const { data: verifyUrlData, error: verifyUrlError } = await supabase.storage.from(IDEA_PDF_BUCKET).createSignedUrl(objectPath, 60);
+  const { data: verifyUrlData, error: verifyUrlError } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).createSignedUrl(objectPath, 60);
   if (verifyUrlError || !verifyUrlData?.signedUrl) {
-    await supabase.storage.from(IDEA_PDF_BUCKET).remove([objectPath]);
-    return res.status(400).json({ error: '업로드된 PDF 파일을 검증하지 못했습니다.' });
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(400).json({ error: '업로드된 참고 자료를 검증하지 못했습니다.' });
   }
-  const verifyResponse = await fetch(verifyUrlData.signedUrl, { headers: { Range: 'bytes=0-4' } });
+  const verifyResponse = await fetch(verifyUrlData.signedUrl, { headers: { Range: 'bytes=0-7' } });
   if (!verifyResponse.ok) {
-    await supabase.storage.from(IDEA_PDF_BUCKET).remove([objectPath]);
-    return res.status(400).json({ error: '업로드된 PDF 파일을 검증하지 못했습니다.' });
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(400).json({ error: '업로드된 참고 자료를 검증하지 못했습니다.' });
   }
   const responseContentType = String(verifyResponse.headers.get('content-type') || '')
     .split(';')[0].trim().toLowerCase();
-  if (infoContentType !== 'application/pdf' && responseContentType !== 'application/pdf') {
-    await supabase.storage.from(IDEA_PDF_BUCKET).remove([objectPath]);
-    return res.status(400).json({ error: 'PDF MIME 형식이 올바르지 않습니다.' });
-  }
-  const firstBytes = Buffer.from(await verifyResponse.arrayBuffer()).subarray(0, 5).toString('ascii');
-  if (firstBytes !== '%PDF-') {
-    await supabase.storage.from(IDEA_PDF_BUCKET).remove([objectPath]);
-    return res.status(400).json({ error: '실제 PDF 파일만 첨부할 수 있습니다.' });
+  if (infoContentType !== expectedMimeType && responseContentType !== expectedMimeType) {
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(400).json({ error: '참고 자료 MIME 형식이 올바르지 않습니다.' });
   }
 
-  const oldPath = loaded.idea.pdfAttachmentPath;
-  const { data: updatedRows, error: updateError } = await supabase
-    .from('ideas')
-    .update({
-      pdf_attachment_path: objectPath,
-      pdf_attachment_name: fileName,
-      pdf_attachment_size: fileSize,
-      pdf_attachment_url: null
-    })
+  const { count: attachmentCount, error: countError } = await supabase
+    .from('idea_attachments')
+    .select('id', { count: 'exact', head: true })
     .eq('room_id', id)
-    .eq('id', ideaId)
-    .eq('submitter_id', userId)
-    .select('id');
-  if (updateError || !updatedRows?.length) {
-    await supabase.storage.from(IDEA_PDF_BUCKET).remove([objectPath]);
-    return res.status(503).json({ error: 'PDF 첨부 정보를 저장하지 못했습니다.' });
+    .eq('idea_id', ideaId);
+  if (countError) return res.status(503).json({ error: '참고 자료 개수를 확인하지 못했습니다.' });
+  if ((attachmentCount || 0) >= 3) {
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(409).json({ error: '참고 자료는 아이디어당 최대 3개까지 첨부할 수 있습니다.' });
+  }
+  const firstBytes = Buffer.from(await verifyResponse.arrayBuffer()).subarray(0, 8);
+  const hasValidSignature = extension === '.pdf'
+    ? firstBytes.subarray(0, 5).toString('ascii') === '%PDF-'
+    : extension === '.png'
+      ? firstBytes.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      : firstBytes[0] === 0xff && firstBytes[1] === 0xd8 && firstBytes[2] === 0xff;
+  if (!hasValidSignature) {
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(400).json({ error: '실제 PDF, PNG, JPG 파일만 첨부할 수 있습니다.' });
   }
 
-  loaded.idea.pdfAttachmentPath = objectPath;
-  loaded.idea.pdfAttachmentName = fileName;
-  loaded.idea.pdfAttachmentSize = fileSize;
-  loaded.idea.pdfAttachmentUrl = undefined;
-  if (oldPath && oldPath !== objectPath) {
-    const { error: removeOldError } = await supabase.storage.from(IDEA_PDF_BUCKET).remove([oldPath]);
-    if (removeOldError) console.warn('[V14 PDF OLD FILE CLEANUP]', removeOldError);
+  const { data: insertedAttachment, error: insertError } = await supabase
+    .from('idea_attachments')
+    .insert({
+      room_id: id,
+      idea_id: ideaId,
+      storage_path: objectPath,
+      original_name: fileName,
+      mime_type: expectedMimeType,
+      file_size: fileSize
+    })
+    .select('*')
+    .single();
+  if (insertError || !insertedAttachment) {
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(503).json({ error: '참고 자료 정보를 저장하지 못했습니다.' });
   }
-  await cleanupIdeaPdfFolder(id, ideaId, objectPath);
-  return res.json({ success: true, pdfAttachmentName: fileName, pdfAttachmentSize: fileSize });
+  const attachment: IdeaAttachment = {
+    id: String(insertedAttachment.id),
+    roomId: id,
+    ideaId,
+    storagePath: objectPath,
+    originalName: fileName,
+    mimeType: expectedMimeType as IdeaAttachment['mimeType'],
+    fileSize,
+    createdAt: insertedAttachment.created_at || undefined
+  };
+  loaded.idea.attachments = [...(loaded.idea.attachments || []).filter(item => !item.legacy), attachment];
+  return res.json({ success: true, attachment });
 });
 
 app.delete('/api/rooms/:id/ideas/:ideaId/pdf', async (req: AuthenticatedRequest, res) => {
@@ -5927,10 +5977,9 @@ app.delete('/api/rooms/:id/ideas/:ideaId/pdf', async (req: AuthenticatedRequest,
       .eq('room_id', id).eq('id', ideaId).eq('submitter_id', userId);
     if (error) return res.status(503).json({ error: 'PDF 첨부 정보를 삭제하지 못했습니다.' });
     if (oldPath) {
-      const { error: removeError } = await supabase.storage.from(IDEA_PDF_BUCKET).remove([oldPath]);
+      const { error: removeError } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([oldPath]);
       if (removeError) console.warn('[V14 PDF DELETE]', removeError);
     }
-    await cleanupIdeaPdfFolder(id, ideaId);
   }
   loaded.idea.pdfAttachmentPath = undefined;
   loaded.idea.pdfAttachmentName = undefined;
@@ -5960,7 +6009,7 @@ app.get('/api/rooms/:id/ideas/:ideaId/pdf', async (req: AuthenticatedRequest, re
       .maybeSingle(),
     supabase
       .from('ideas')
-      .select('submitter_id,pdf_attachment_path')
+      .select('submitter_id,pdf_attachment_path,pdf_attachment_name')
       .eq('room_id', id)
       .eq('id', ideaId)
       .maybeSingle()
@@ -5972,19 +6021,87 @@ app.get('/api/rooms/:id/ideas/:ideaId/pdf', async (req: AuthenticatedRequest, re
   if (!roomResult.data) return res.status(404).send('방을 찾을 수 없습니다.');
   if (!ideaResult.data?.pdf_attachment_path) return res.status(404).send('첨부된 PDF를 찾을 수 없습니다.');
 
-  const roomStatus = String(roomResult.data.status || 'IDEA_SUBMISSION');
-  if (roomStatus === 'IDEA_SUBMISSION') {
-    if (ideaResult.data.submitter_id !== userId) {
-      return res.status(403).send('아이디어 제출 단계에서는 작성자 본인의 첨부 자료만 열람할 수 있습니다.');
-    }
-  } else if (!['EVALUATION', 'EVALUATION_ROUND_2'].includes(roomStatus)) {
-    return res.status(403).send('PDF 참고 자료는 점수 평가 단계에서만 열람할 수 있습니다.');
+  if (roomResult.data.status === 'IDEA_SUBMISSION' && ideaResult.data.submitter_id !== userId) {
+    return res.status(403).send('아이디어 등록 단계에서는 작성자 본인만 참고 자료를 열람할 수 있습니다.');
   }
 
+  const download = req.query.download === '1';
+  const storedPath = String(ideaResult.data.pdf_attachment_path);
+  const safeDownloadName = ideaResult.data.submitter_id === userId
+    ? ideaResult.data.pdf_attachment_name || `reference${path.extname(storedPath)}`
+    : `참고-자료${path.extname(storedPath)}`;
   const { data, error } = await supabase.storage
-    .from(IDEA_PDF_BUCKET)
-    .createSignedUrl(String(ideaResult.data.pdf_attachment_path), 60);
+    .from(IDEA_REFERENCE_BUCKET)
+    .createSignedUrl(
+      storedPath,
+      60,
+      download ? { download: safeDownloadName } : undefined
+    );
   if (error || !data?.signedUrl) return res.status(503).send('PDF 열람 주소를 만들지 못했습니다.');
+  res.setHeader('Cache-Control', 'no-store');
+  return res.redirect(302, data.signedUrl);
+});
+
+app.delete('/api/rooms/:id/ideas/:ideaId/attachments/:attachmentId', async (req: AuthenticatedRequest, res) => {
+  const { id, ideaId, attachmentId } = req.params;
+  const userId = req.auth!.userId;
+  const loaded = await loadPdfIdeaForOwner(id, ideaId, userId);
+  if ('error' in loaded) return res.status(loaded.status).json({ error: loaded.error });
+  const { data: attachment, error: findError } = await supabase
+    .from('idea_attachments')
+    .select('id,storage_path')
+    .eq('id', attachmentId)
+    .eq('room_id', id)
+    .eq('idea_id', ideaId)
+    .maybeSingle();
+  if (findError) return res.status(503).json({ error: '참고 자료를 확인하지 못했습니다.' });
+  if (!attachment) return res.status(404).json({ error: '참고 자료를 찾을 수 없습니다.' });
+  const { error: deleteError } = await supabase.from('idea_attachments').delete().eq('id', attachmentId);
+  if (deleteError) return res.status(503).json({ error: '참고 자료 정보를 삭제하지 못했습니다.' });
+  const { error: storageError } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([String(attachment.storage_path)]);
+  if (storageError) console.warn('[IDEA ATTACHMENT DELETE]', storageError);
+  loaded.idea.attachments = (loaded.idea.attachments || []).filter(item => item.id !== attachmentId);
+  return res.json({ success: true });
+});
+
+app.get('/api/rooms/:id/ideas/:ideaId/attachments/:attachmentId', async (req: AuthenticatedRequest, res) => {
+  const { id, ideaId, attachmentId } = req.params;
+  const userId = req.auth!.userId;
+  if (!SUPABASE_CONFIGURED) return res.status(503).send('참고 자료 열람은 Supabase 연결 환경에서만 사용할 수 있습니다.');
+  const roomAccess = req.roomAccess?.roomId === id ? req.roomAccess : await getRoomAccessContext(id, userId);
+  if (!roomAccess.isMember) return res.status(403).send('이 회의실의 사용자가 아닙니다.');
+  if (roomAccess.role === 'VOTER') return res.status(403).send('외부 투표자는 참고 자료를 열람할 수 없습니다.');
+  const [roomResult, ideaResult, attachmentResult] = await Promise.all([
+    supabase.from('rooms').select('status').eq('id', id).maybeSingle(),
+    supabase.from('ideas').select('submitter_id').eq('room_id', id).eq('id', ideaId).maybeSingle(),
+    supabase
+      .from('idea_attachments')
+      .select('storage_path,original_name')
+      .eq('id', attachmentId)
+      .eq('room_id', id)
+      .eq('idea_id', ideaId)
+      .maybeSingle()
+  ]);
+  if (roomResult.error || ideaResult.error || attachmentResult.error) {
+    return res.status(503).send('참고 자료 열람 권한을 확인하지 못했습니다.');
+  }
+  if (!roomResult.data) return res.status(404).send('방을 찾을 수 없습니다.');
+  if (!ideaResult.data) return res.status(404).send('아이디어를 찾을 수 없습니다.');
+  if (roomResult.data.status === 'IDEA_SUBMISSION' && ideaResult.data.submitter_id !== userId) {
+    return res.status(403).send('아이디어 등록 단계에서는 작성자 본인만 참고 자료를 열람할 수 있습니다.');
+  }
+  const attachment = attachmentResult.data;
+  if (!attachment) return res.status(404).send('참고 자료를 찾을 수 없습니다.');
+  const storedPath = String(attachment.storage_path);
+  const safeDownloadName = req.query.download === '1'
+    ? `참고-자료${path.extname(storedPath)}`
+    : undefined;
+  const { data, error } = await supabase.storage.from(IDEA_REFERENCE_BUCKET).createSignedUrl(
+    storedPath,
+    60,
+    safeDownloadName ? { download: safeDownloadName } : undefined
+  );
+  if (error || !data?.signedUrl) return res.status(503).send('참고 자료 열람 주소를 만들지 못했습니다.');
   res.setHeader('Cache-Control', 'no-store');
   return res.redirect(302, data.signedUrl);
 });
@@ -7165,9 +7282,10 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
   const completedParticipantsCount = Array.from(ideaCompletedSet)
     .filter(completedUserId => eligibleIdeaParticipants.has(completedUserId)).length;
   const participantCount = Math.max(1, participantUserIds.length || 1);
-  const ideasRevealed =
-    room.status !== 'IDEA_SUBMISSION' || completedParticipantsCount >= participantCount;
-  const canViewEvaluationReferences = ['EVALUATION', 'EVALUATION_ROUND_2'].includes(room.status);
+  // Completion only locks a participant's own submission. The host's successful
+  // room transition is the single reveal event for every participant.
+  const ideasRevealed = room.status !== 'IDEA_SUBMISSION';
+  const canViewIdeaReferences = !isExternalVoter;
   const visibleIdeas = (isExternalVoter
     ? roomIdeas.filter(idea => idea.status === 'ACTIVE' || idea.status === 'WINNER')
     : ideasRevealed
@@ -7181,6 +7299,7 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
         pdfAttachmentPath: _privatePdfAttachmentPath,
         pdfAttachmentName: _privatePdfAttachmentName,
         pdfAttachmentSize: _privatePdfAttachmentSize,
+        attachments: _privateAttachments,
         ...voterIdea
       } = idea;
       return {
@@ -7202,14 +7321,21 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
       ...publicIdea,
       submitterId: '',
       submitterName: `익명 아이디어 #${index + 1}`,
-      pdfAttachmentUrl: canViewEvaluationReferences && idea.pdfAttachmentUrl ? '참고 자료.pdf' : undefined,
-      pdfAttachmentPath: canViewEvaluationReferences && idea.pdfAttachmentPath ? '__PRIVATE_PDF__' : undefined,
-      pdfAttachmentName: canViewEvaluationReferences && (idea.pdfAttachmentPath || idea.pdfAttachmentUrl)
-        ? '참고 자료.pdf'
+      pdfAttachmentUrl: canViewIdeaReferences && idea.pdfAttachmentUrl ? '참고 자료.pdf' : undefined,
+      pdfAttachmentPath: canViewIdeaReferences && idea.pdfAttachmentPath ? '__PRIVATE_REFERENCE__' : undefined,
+      pdfAttachmentName: canViewIdeaReferences && (idea.pdfAttachmentPath || idea.pdfAttachmentUrl)
+        ? `참고 자료${idea.pdfAttachmentPath ? path.extname(idea.pdfAttachmentPath) : '.pdf'}`
         : undefined,
-      pdfAttachmentSize: canViewEvaluationReferences && idea.pdfAttachmentPath
+      pdfAttachmentSize: canViewIdeaReferences && idea.pdfAttachmentPath
         ? idea.pdfAttachmentSize
         : undefined,
+      attachments: canViewIdeaReferences
+        ? (idea.attachments || []).map(attachment => ({
+            ...attachment,
+            storagePath: undefined,
+            originalName: `참고 자료${attachment.mimeType === 'application/pdf' ? '.pdf' : attachment.mimeType === 'image/png' ? '.png' : '.jpg'}`
+          }))
+        : [],
       evaluationCard: evaluationCards[idea.id]
     } as Idea;
   });
@@ -7297,6 +7423,7 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
   const result: RoomDetails = {
     room,
     ideas: visibleIdeas,
+    activeIdeaCount: roomIdeas.filter(idea => idea.status === 'ACTIVE').length,
     criteria: isExternalVoter ? [] : roomCriteria,
     proposals: isExternalVoter ? [] : visibleProposals,
     proposalsCount: isExternalVoter ? 0 : visibleProposals.length,

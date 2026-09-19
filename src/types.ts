@@ -70,6 +70,7 @@ export interface Idea {
   pdfAttachmentPath?: string;
   pdfAttachmentName?: string;
   pdfAttachmentSize?: number;
+  attachments?: IdeaAttachment[];
   tags?: string[];
   submitterId: string;
   submitterName: string;
@@ -183,6 +184,18 @@ export interface DecisionReport {
   generatedAt: string;
 }
 
+export interface IdeaAttachment {
+  id: string;
+  roomId: string;
+  ideaId: string;
+  storagePath?: string;
+  originalName: string;
+  mimeType: 'application/pdf' | 'image/png' | 'image/jpeg';
+  fileSize: number;
+  createdAt?: string;
+  legacy?: boolean;
+}
+
 export interface Participant {
   id?: string;
   roomId: string;
@@ -206,6 +219,7 @@ export interface RoomDetails {
   criteria: Criterion[];
   proposals?: CriterionProposal[];
   proposalsCount: number;
+  activeIdeaCount?: number;
   completedParticipantsCount?: number; // count of unique participants who submitted 1 or more ideas
   criteriaCompletedParticipantsCount?: number;
   criteriaProposalsRevealed?: boolean;

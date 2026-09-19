@@ -34,6 +34,7 @@ erDiagram
 | 초대 | `room_account_invites` | 가입 계정 대상 초대와 좌석 예약 상태 |
 | 초대 | `room_voter_registrations` | 최종 투표 전 대기·활성 외부 투표자 |
 | 아이디어 | `ideas` | 후보 원문과 현재 상태 |
+| 아이디어 | `idea_attachments` | 아이디어별 비공개 참고 자료 메타데이터(최대 3개, PDF/PNG/JPEG) |
 | 아이디어 | `idea_versions` | 원본·익명화·보완본 버전 스냅샷 |
 | 기준 | `criterion_proposals` | 참여자가 낸 익명 기준 제안 |
 | 기준 | `criteria` | 확정 평가 기준 |

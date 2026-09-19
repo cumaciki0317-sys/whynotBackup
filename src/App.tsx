@@ -40,6 +40,7 @@ import {
   Room,
   RoomStatus,
   Idea,
+  IdeaAttachment,
   Criterion,
   CriterionProposal,
   Evaluation,
@@ -532,8 +533,7 @@ export default function App() {
   const [ideaTitle, setIdeaTitle] = useState('');
   const [ideaDesc, setIdeaDesc] = useState('');
   const [ideaLink, setIdeaLink] = useState('');
-  const [ideaPdfName, setIdeaPdfName] = useState('');
-  const [ideaPdfFile, setIdeaPdfFile] = useState<File | null>(null);
+  const [ideaReferenceFiles, setIdeaReferenceFiles] = useState<File[]>([]);
   const [ideaTags, setIdeaTags] = useState('');
 
 
@@ -548,8 +548,7 @@ export default function App() {
   const [editIdeaTitle, setEditIdeaTitle] = useState('');
   const [editIdeaDesc, setEditIdeaDesc] = useState('');
   const [editIdeaLink, setEditIdeaLink] = useState('');
-  const [editIdeaPdfName, setEditIdeaPdfName] = useState('');
-  const [editIdeaPdfFile, setEditIdeaPdfFile] = useState<File | null>(null);
+  const [editIdeaReferenceFiles, setEditIdeaReferenceFiles] = useState<File[]>([]);
   const [isIdeaSubmitBusy, setIsIdeaSubmitBusy] = useState(false);
   const [busyIdeaMutationId, setBusyIdeaMutationId] = useState<string | null>(null);
 
@@ -938,7 +937,7 @@ export default function App() {
 
     const participantTotal = Math.max(1, Number((roomDetails as any).participantCount || 1));
     const completedTotal = Number(roomDetails.completedParticipantsCount || 0);
-    const ideaCount = (roomDetails.ideas || []).length;
+    const ideaCount = Number(roomDetails.activeIdeaCount ?? (roomDetails.ideas || []).length);
     const targetWinnerCount = Math.max(1, Number(roomDetails.room.targetWinnerCount || 1));
     const minimumIdeaCount = roomDetails.room.decisionMode === 'QUICK'
       ? Math.max(2, targetWinnerCount)
@@ -1825,7 +1824,7 @@ export default function App() {
   };
 
 
-  const MAX_IDEA_PDF_BYTES = 10 * 1024 * 1024;
+  const MAX_IDEA_REFERENCE_BYTES = 10 * 1024 * 1024;
 
   const normalizeReferenceLinkForInput = (value: string) => {
     const trimmed = value.trim();
@@ -1880,30 +1879,37 @@ export default function App() {
       : Math.max(1, Math.round(bytes / 1024)) + ' KB';
   };
 
-  const validatePdfFile = async (file: File) => {
-    if (!/\.pdf$/i.test(file.name) || file.type !== 'application/pdf') throw new Error('PDF 파일만 첨부할 수 있습니다.');
-    if (file.size <= 0 || file.size > MAX_IDEA_PDF_BYTES) throw new Error('PDF 파일은 10MB 이하만 첨부할 수 있습니다.');
-    const header = new TextDecoder('ascii').decode(await file.slice(0, 5).arrayBuffer());
-    if (header !== '%PDF-') throw new Error('실제 PDF 파일만 첨부할 수 있습니다.');
+  const validateReferenceFile = async (file: File) => {
+    const extension = file.name.match(/\.(pdf|png|jpe?g)$/i)?.[1]?.toLowerCase();
+    const expectedMime = extension === 'pdf' ? 'application/pdf' : extension === 'png' ? 'image/png' : extension ? 'image/jpeg' : '';
+    if (!expectedMime || file.type.toLowerCase() !== expectedMime) throw new Error('PDF, PNG, JPG 파일만 첨부할 수 있습니다.');
+    if (file.size <= 0 || file.size > MAX_IDEA_REFERENCE_BYTES) throw new Error('참고 자료는 10MB 이하만 첨부할 수 있습니다.');
+    const header = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    const valid = extension === 'pdf'
+      ? new TextDecoder('ascii').decode(header.slice(0, 5)) === '%PDF-'
+      : extension === 'png'
+        ? [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, index) => header[index] === byte)
+        : header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    if (!valid) throw new Error('실제 PDF, PNG, JPG 파일만 첨부할 수 있습니다.');
   };
 
-  const uploadIdeaPdf = async (ideaId: string, file: File) => {
+  const uploadIdeaReference = async (ideaId: string, file: File) => {
     if (!activeRoomId) throw new Error('회의실 정보를 찾을 수 없습니다.');
-    await validatePdfFile(file);
-    const ticketResponse = await apiFetch(`/api/rooms/${activeRoomId}/ideas/${ideaId}/pdf/upload-ticket`, {
+    await validateReferenceFile(file);
+    const ticketResponse = await apiFetch(`/api/rooms/${activeRoomId}/ideas/${ideaId}/attachments/upload-ticket`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileName: file.name, fileSize: file.size, mimeType: file.type })
     });
     const ticket = await ticketResponse.json().catch(() => ({}));
-    if (!ticketResponse.ok || !ticket?.signedUrl || !ticket?.token || !ticket?.path) throw new Error(ticket?.error || 'PDF 업로드를 준비하지 못했습니다.');
+    if (!ticketResponse.ok || !ticket?.signedUrl || !ticket?.token || !ticket?.path) throw new Error(ticket?.error || '참고 자료 업로드를 준비하지 못했습니다.');
 
     // Signed upload token을 사용해 브라우저가 Storage로 직접 업로드합니다.
     // 파일 본문은 Vercel/Express 서버를 통과하지 않습니다.
     const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim();
     const supabaseAnonKey = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
     if (!supabaseUrl || !supabaseAnonKey) {
-      throw new Error('PDF 업로드용 Supabase 환경 설정을 확인해 주세요.');
+      throw new Error('참고 자료 업로드용 Supabase 환경 설정을 확인해 주세요.');
     }
     const storageClient = createClient(supabaseUrl, supabaseAnonKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
@@ -1912,44 +1918,47 @@ export default function App() {
       .from('idea-pdfs')
       .uploadToSignedUrl(ticket.path, ticket.token, file, {
         cacheControl: '3600',
-        contentType: 'application/pdf'
+        contentType: file.type
       });
-    if (uploadError) throw new Error('PDF 파일 업로드에 실패했습니다.');
+    if (uploadError) throw new Error('참고 자료 업로드에 실패했습니다.');
 
-    const finalizeResponse = await apiFetch(`/api/rooms/${activeRoomId}/ideas/${ideaId}/pdf/finalize`, {
+    const finalizeResponse = await apiFetch(`/api/rooms/${activeRoomId}/ideas/${ideaId}/attachments/finalize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: ticket.path, fileName: file.name, fileSize: file.size })
     });
     const finalized = await finalizeResponse.json().catch(() => ({}));
-    if (!finalizeResponse.ok) throw new Error(finalized?.error || 'PDF 첨부를 완료하지 못했습니다.');
+    if (!finalizeResponse.ok) throw new Error(finalized?.error || '참고 자료 첨부를 완료하지 못했습니다.');
     return finalized;
   };
 
-  const openIdeaPdf = (ideaId: string) => {
+  const getIdeaAttachments = (idea: Idea): IdeaAttachment[] => idea.attachments || [];
+
+  const openIdeaAttachment = (ideaId: string, attachment: IdeaAttachment, download = false) => {
     if (!activeRoomId) return;
-    window.open(`/api/rooms/${activeRoomId}/ideas/${ideaId}/pdf`, '_blank', 'noopener,noreferrer');
+    if (attachment.legacy) {
+      window.open(`/api/rooms/${activeRoomId}/ideas/${ideaId}/pdf${download ? '?download=1' : ''}`, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    const suffix = download ? '?download=1' : '';
+    window.open(`/api/rooms/${activeRoomId}/ideas/${ideaId}/attachments/${attachment.id}${suffix}`, '_blank', 'noopener,noreferrer');
   };
 
-  const deleteIdeaPdf = async (ideaId: string) => {
-    if (!activeRoomId || busyIdeaMutationId === ideaId) return false;
-    if (!window.confirm('첨부된 PDF를 삭제하시겠습니까?')) return false;
+  const deleteIdeaAttachment = async (ideaId: string, attachment: IdeaAttachment) => {
+    if (!activeRoomId || busyIdeaMutationId === ideaId) return;
+    if (!window.confirm('이 참고 자료를 삭제하시겠습니까?')) return;
     setBusyIdeaMutationId(ideaId);
     try {
-      const response = await apiFetch(`/api/rooms/${activeRoomId}/ideas/${ideaId}/pdf`, { method: 'DELETE' });
+      const endpoint = attachment.legacy
+        ? `/api/rooms/${activeRoomId}/ideas/${ideaId}/pdf`
+        : `/api/rooms/${activeRoomId}/ideas/${ideaId}/attachments/${attachment.id}`;
+      const response = await apiFetch(endpoint, { method: 'DELETE' });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        triggerToast(data?.error || 'PDF를 삭제하지 못했습니다.', 'error');
-        return false;
-      }
-      setEditIdeaPdfFile(null);
-      setEditIdeaPdfName('');
+      if (!response.ok) throw new Error(data?.error || '참고 자료를 삭제하지 못했습니다.');
       await fetchRoomDetails(activeRoomId, true);
-      triggerToast('PDF 참고 자료를 삭제했습니다.');
-      return true;
+      triggerToast('참고 자료를 삭제했습니다.');
     } catch (error) {
-      triggerToast(error instanceof Error ? error.message : 'PDF를 삭제하지 못했습니다.', 'error');
-      return false;
+      triggerToast(error instanceof Error ? error.message : '참고 자료를 삭제하지 못했습니다.', 'error');
     } finally {
       setBusyIdeaMutationId(current => current === ideaId ? null : current);
     }
@@ -2791,9 +2800,11 @@ export default function App() {
       if (!response.ok) {
         throw new Error(data?.error || '아이디어를 등록하지 못했습니다.');
       }
-      if (ideaPdfFile) {
+      if (ideaReferenceFiles.length > 0) {
         try {
-          await uploadIdeaPdf(String(data?.id || ''), ideaPdfFile);
+          for (const file of ideaReferenceFiles) {
+            await uploadIdeaReference(String(data?.id || ''), file);
+          }
         } catch (pdfError) {
           if (data?.id) {
             await apiFetch(`/api/rooms/${activeRoomId}/ideas/${data.id}`, { method: 'DELETE' }).catch(() => null);
@@ -2813,8 +2824,7 @@ export default function App() {
     setIdeaTitle('');
     setIdeaDesc('');
     setIdeaLink('');
-    setIdeaPdfName('');
-    setIdeaPdfFile(null);
+    setIdeaReferenceFiles([]);
     setIdeaTags('');
     await fetchRoomDetails(activeRoomId!);
   };
@@ -2844,11 +2854,13 @@ export default function App() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.error || '아이디어를 수정하지 못했습니다.');
-      if (editIdeaPdfFile) {
+      if (editIdeaReferenceFiles.length > 0) {
         try {
-          await uploadIdeaPdf(ideaId, editIdeaPdfFile);
+          for (const file of editIdeaReferenceFiles) {
+            await uploadIdeaReference(ideaId, file);
+          }
         } catch (pdfError) {
-          triggerToast('아이디어 내용은 저장되었지만 PDF 교체에 실패했습니다. 기존 PDF는 유지됩니다.', 'error');
+          triggerToast('아이디어 내용은 저장되었지만 일부 참고 자료 업로드에 실패했습니다.', 'error');
           if (activeRoomId) await fetchRoomDetails(activeRoomId, true);
           return;
         }
@@ -2862,6 +2874,7 @@ export default function App() {
     }
 
     triggerToast('아이디어가 성공적으로 수정되었습니다.');
+    setEditIdeaReferenceFiles([]);
     setEditingIdeaId(null);
     if (activeRoomId) await fetchRoomDetails(activeRoomId, true);
   };
@@ -5651,7 +5664,7 @@ export default function App() {
                           const minimumIdeaCount = roomDetails.room.decisionMode === 'QUICK'
                             ? Math.max(2, targetWinnerCount)
                             : Math.max(2, targetWinnerCount + 1);
-                          const currentIdeaCount = (roomDetails.ideas || []).length;
+                          const currentIdeaCount = Number(roomDetails.activeIdeaCount ?? (roomDetails.ideas || []).length);
                           const ideasCountMet = currentIdeaCount >= minimumIdeaCount;
                           const participantQuorumMet = ideaCompletedCount >= targetTotalCount;
                           const isIdeaGateMinMet = targetTotalCount >= 2 && ideasCountMet && participantQuorumMet;
@@ -5698,7 +5711,7 @@ export default function App() {
                               <div className="flex items-center justify-center gap-1.5 text-xs font-bold">
                                 <span className="text-slate-500">현재 수집 상태 :</span>
                                 <span className={isIdeaGateMinMet ? 'text-emerald-600 font-extrabold' : 'text-amber-600 font-extrabold'}>
-                                  {ideaCompletedCount} / {targetTotalCount} 명 완료 (아이디어 {(roomDetails.ideas || []).length}개)
+                                  {ideaCompletedCount} / {targetTotalCount} 명 완료 (아이디어 {currentIdeaCount}개)
                                 </span>
                               </div>
 
@@ -5841,54 +5854,49 @@ export default function App() {
                                       </div>
 
                                       <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-700">PDF 참고 자료 (선택)</label>
-                                        {(idea.pdfAttachmentPath || idea.pdfAttachmentUrl) && !editIdeaPdfFile && (
-                                          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
-                                            <div className="min-w-0">
-                                              <p className="text-[10px] font-bold text-slate-400">{idea.pdfAttachmentPath ? '현재 첨부' : '기존 PDF 기록'}</p>
-                                              <p className="text-xs font-extrabold text-slate-800 truncate">
-                                                📄 {idea.pdfAttachmentPath ? (idea.pdfAttachmentName || '참고 자료.pdf') : '실제 저장 파일 없음 · 열람 불가'}
-                                              </p>
-                                            </div>
-                                            <div className="flex items-center gap-1.5">
-                                              {idea.pdfAttachmentPath && (
-                                                <button type="button" onClick={() => openIdeaPdf(idea.id)} className="px-2.5 py-1.5 rounded-lg border border-indigo-200 bg-white text-[11px] font-black text-indigo-700 hover:bg-indigo-50">열기 ↗</button>
-                                              )}
-                                              <button type="button" onClick={() => void deleteIdeaPdf(idea.id)} disabled={busyIdeaMutationId === idea.id} className="px-2.5 py-1.5 rounded-lg border border-rose-200 bg-white text-[11px] font-black text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed">{busyIdeaMutationId === idea.id ? '처리 중…' : idea.pdfAttachmentPath ? '삭제' : '기존 기록 지우기'}</button>
+                                        <label className="text-xs font-bold text-slate-700">참고 자료 (선택)</label>
+                                        {getIdeaAttachments(idea).map(attachment => (
+                                          <div key={attachment.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 flex items-center justify-between gap-2">
+                                            <span className="text-xs font-extrabold text-slate-800 truncate">📎 {attachment.originalName}</span>
+                                            <div className="flex items-center gap-1.5 shrink-0">
+                                              <button type="button" onClick={() => openIdeaAttachment(idea.id, attachment)} className="px-2 py-1 rounded-lg border border-indigo-200 bg-white text-[11px] font-black text-indigo-700">보기</button>
+                                              <button type="button" onClick={() => void deleteIdeaAttachment(idea.id, attachment)} className="px-2 py-1 rounded-lg border border-rose-200 bg-white text-[11px] font-black text-rose-600">삭제</button>
                                             </div>
                                           </div>
-                                        )}
+                                        ))}
                                         <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/30 p-3 space-y-2">
                                           <input
                                             type="file"
-                                            accept=".pdf,application/pdf"
-                                            disabled={busyIdeaMutationId === idea.id}
+                                            multiple
+                                            accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                                            disabled={busyIdeaMutationId === idea.id || getIdeaAttachments(idea).length + editIdeaReferenceFiles.length >= 3}
                                             onChange={async e => {
                                               const input = e.currentTarget;
-                                              const file = input.files?.[0] || null;
-                                              if (!file) { setEditIdeaPdfFile(null); return; }
+                                              const files = Array.from(input.files || []) as File[];
+                                              input.value = '';
+                                              if (!files.length) return;
+                                              if (getIdeaAttachments(idea).length + editIdeaReferenceFiles.length + files.length > 3) {
+                                                triggerToast('참고 자료는 아이디어당 최대 3개까지 첨부할 수 있습니다.', 'error');
+                                                return;
+                                              }
                                               try {
-                                                await validatePdfFile(file);
-                                                setEditIdeaPdfFile(file);
-                                                setEditIdeaPdfName(file.name);
+                                                for (const file of files) await validateReferenceFile(file);
+                                                setEditIdeaReferenceFiles(current => [...current, ...files]);
                                               } catch (error) {
-                                                input.value = '';
-                                                setEditIdeaPdfFile(null);
-                                                triggerToast(error instanceof Error ? error.message : 'PDF 파일을 확인해 주세요.', 'error');
+                                                triggerToast(error instanceof Error ? error.message : '참고 자료를 확인해 주세요.', 'error');
                                               }
                                             }}
                                             className="w-full text-xs text-slate-500 file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-white file:text-indigo-700 hover:file:bg-indigo-100"
                                           />
-                                          <p className="text-[10px] text-slate-500">PDF만 가능 · 최대 10MB · 새 PDF 검증이 완료된 뒤 기존 파일을 교체합니다.</p>
+                                          <p className="text-[10px] text-slate-500">PDF, PNG, JPG 파일을 첨부할 수 있습니다. 최대 10MB</p>
                                         </div>
-                                        {editIdeaPdfFile && (
-                                          <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2.5">
-                                            <p className="text-[10px] font-black text-emerald-700">교체할 PDF 준비 완료</p>
-                                            <p className="text-xs font-extrabold text-slate-800 truncate mt-0.5">📄 {editIdeaPdfName}</p>
-                                            <p className="text-[10px] text-slate-400">{formatPdfSize(editIdeaPdfFile.size)}</p>
+                                        {editIdeaReferenceFiles.map((file, index) => (
+                                          <div key={`${file.name}-${file.lastModified}-${index}`} className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2 flex items-center justify-between gap-2">
+                                            <span className="text-xs font-extrabold text-slate-800 truncate">📎 {file.name} · {formatPdfSize(file.size)}</span>
+                                            <button type="button" onClick={() => setEditIdeaReferenceFiles(current => current.filter((_, itemIndex) => itemIndex !== index))} className="text-[11px] font-black text-rose-600">선택 삭제</button>
                                           </div>
-                                        )}
-                                        <p className="text-[10px] text-amber-700 leading-relaxed">익명 제출을 위해 PDF 본문의 이름·이메일·연락처 등 식별 정보를 확인해 주세요.</p>
+                                        ))}
+                                        <p className="text-[10px] text-amber-700 leading-relaxed">익명 제출을 위해 파일 본문의 이름·이메일·연락처 등 식별 정보를 확인해 주세요.</p>
                                       </div>
                                     </div>
 
@@ -5941,8 +5949,7 @@ export default function App() {
                                             setEditIdeaTitle(idea.title || '');
                                             setEditIdeaDesc(idea.description || '');
                                             setEditIdeaLink(idea.attachmentUrl || '');
-                                            setEditIdeaPdfName(idea.pdfAttachmentName || idea.pdfAttachmentUrl || '');
-                                            setEditIdeaPdfFile(null);
+                                            setEditIdeaReferenceFiles([]);
                                           }}
                                           className="px-2 py-1 text-xs font-medium text-slate-600 hover:text-indigo-600 bg-slate-100 hover:bg-indigo-50 rounded-lg border border-slate-200 flex items-center gap-1 transition"
                                           title="수정"
@@ -5989,7 +5996,7 @@ export default function App() {
                                     );
                                   })()}
 
-                                  {(idea.attachmentUrl || idea.pdfAttachmentPath || idea.pdfAttachmentUrl) && (
+                                  {(idea.attachmentUrl || getIdeaAttachments(idea).length > 0 || idea.pdfAttachmentUrl) && (
                                     <div className="grid sm:grid-cols-2 gap-2 text-xs pt-2 border-t border-slate-100">
                                       {idea.attachmentUrl && (
                                         <a href={idea.attachmentUrl} target="_blank" rel="noopener noreferrer" className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 py-2 flex items-center justify-between gap-2 hover:bg-indigo-50 hover:border-indigo-200 transition">
@@ -5997,11 +6004,26 @@ export default function App() {
                                           <span className="text-indigo-600 font-black shrink-0">열기 ↗</span>
                                         </a>
                                       )}
-                                      {idea.pdfAttachmentPath ? (
-                                        <button type="button" onClick={() => openIdeaPdf(idea.id)} className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 py-2 flex items-center justify-between gap-2 hover:bg-indigo-50 hover:border-indigo-200 transition text-left">
-                                          <span className="min-w-0"><span className="block text-[10px] font-bold text-slate-400">PDF 참고 자료</span><span className="block font-extrabold text-slate-800 truncate">📄 {idea.pdfAttachmentName || '참고 자료.pdf'}</span></span>
-                                          <span className="text-indigo-600 font-black shrink-0">열기 ↗</span>
-                                        </button>
+                                      {getIdeaAttachments(idea).length > 0 ? (
+                                        <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+                                          <button type="button" onClick={() => toggleIdeaExpanded(`attachments_${idea.id}`)} className="w-full flex items-center justify-between gap-2 text-left font-extrabold text-slate-800">
+                                            <span>📎 참고 자료 {getIdeaAttachments(idea).length}개</span>
+                                            {expandedIdeaIds[`attachments_${idea.id}`] ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                          </button>
+                                          {expandedIdeaIds[`attachments_${idea.id}`] && (
+                                            <div className="space-y-2 border-t border-slate-100 pt-2">
+                                              {getIdeaAttachments(idea).map(attachment => (
+                                                <div key={attachment.id} className="flex items-center justify-between gap-2">
+                                                  <span className="truncate text-[11px] font-bold text-slate-600">{attachment.originalName}</span>
+                                                  <span className="flex gap-2 shrink-0">
+                                                    <button type="button" onClick={() => openIdeaAttachment(idea.id, attachment)} className="font-black text-indigo-600">보기</button>
+                                                    <button type="button" onClick={() => openIdeaAttachment(idea.id, attachment, true)} className="font-black text-indigo-600">다운로드</button>
+                                                  </span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
                                       ) : idea.pdfAttachmentUrl ? (
                                         <div className="min-h-11 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 flex items-center justify-between gap-2 text-left">
                                           <span className="min-w-0"><span className="block text-[10px] font-bold text-slate-400">기존 PDF 기록</span><span className="block font-extrabold text-slate-600 truncate">📄 실제 저장 파일 없음</span></span>
@@ -6075,41 +6097,40 @@ export default function App() {
                             </div>
 
                             <div className="space-y-2">
-                              <label className="text-xs font-bold text-slate-700">PDF 참고 자료 (선택)</label>
+                              <label className="text-xs font-bold text-slate-700">참고 자료 (선택)</label>
                               <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/30 p-3 space-y-2">
                                 <input
                                   type="file"
-                                  accept=".pdf,application/pdf"
-                                  disabled={isIdeaSubmitBusy}
+                                  multiple
+                                  accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                                  disabled={isIdeaSubmitBusy || ideaReferenceFiles.length >= 3}
                                   onChange={async e => {
                                     const input = e.currentTarget;
-                                    const file = input.files?.[0] || null;
-                                    if (!file) { setIdeaPdfFile(null); setIdeaPdfName(''); return; }
+                                    const files = Array.from(input.files || []) as File[];
+                                    input.value = '';
+                                    if (!files.length) return;
+                                    if (ideaReferenceFiles.length + files.length > 3) {
+                                      triggerToast('참고 자료는 아이디어당 최대 3개까지 첨부할 수 있습니다.', 'error');
+                                      return;
+                                    }
                                     try {
-                                      await validatePdfFile(file);
-                                      setIdeaPdfFile(file);
-                                      setIdeaPdfName(file.name);
+                                      for (const file of files) await validateReferenceFile(file);
+                                      setIdeaReferenceFiles(current => [...current, ...files]);
                                     } catch (error) {
-                                      input.value = '';
-                                      setIdeaPdfFile(null);
-                                      setIdeaPdfName('');
-                                      triggerToast(error instanceof Error ? error.message : 'PDF 파일을 확인해 주세요.', 'error');
+                                      triggerToast(error instanceof Error ? error.message : '참고 자료를 확인해 주세요.', 'error');
                                     }
                                   }}
                                   className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-white file:text-indigo-700 hover:file:bg-indigo-100"
                                 />
-                                <p className="text-[10px] text-slate-500">PDF만 가능 · 최대 10MB · 실제 PDF 형식을 확인합니다.</p>
+                                <p className="text-[10px] text-slate-500">PDF, PNG, JPG 파일을 첨부할 수 있습니다. 최대 10MB</p>
                               </div>
-                              {ideaPdfFile && (
-                                <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2.5 flex items-center justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <p className="text-[10px] font-black text-emerald-700 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> 첨부 준비 완료</p>
-                                    <p className="text-xs font-extrabold text-slate-800 truncate mt-0.5">📄 {ideaPdfName}</p>
-                                    <p className="text-[10px] text-slate-400">{formatPdfSize(ideaPdfFile.size)}</p>
-                                  </div>
+                              {ideaReferenceFiles.map((file, index) => (
+                                <div key={`${file.name}-${file.lastModified}-${index}`} className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2 flex items-center justify-between gap-3">
+                                  <span className="text-xs font-extrabold text-slate-800 truncate">📎 {file.name} · {formatPdfSize(file.size)}</span>
+                                  <button type="button" onClick={() => setIdeaReferenceFiles(current => current.filter((_, itemIndex) => itemIndex !== index))} className="text-[11px] font-black text-rose-600 shrink-0">선택 삭제</button>
                                 </div>
-                              )}
-                              <p className="text-[10px] text-amber-700 leading-relaxed bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-2">익명 제출 안내: PDF 본문에 이름, 이메일, 연락처 등 작성자를 식별할 수 있는 정보가 포함되어 있지 않은지 확인해 주세요.</p>
+                              ))}
+                              <p className="text-[10px] text-amber-700 leading-relaxed bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-2">익명 제출 안내: 파일 본문에 이름, 이메일, 연락처 등 작성자를 식별할 수 있는 정보가 포함되어 있지 않은지 확인해 주세요.</p>
                             </div>
 
                             <div className="bg-indigo-50/60 p-3 rounded-xl border border-indigo-100 text-xs text-indigo-900 leading-relaxed">
@@ -6144,6 +6165,79 @@ export default function App() {
                     </div>
                   )
                 )}
+
+                  {(roomDetails.room?.status === 'CRITERIA_PROPOSAL' || roomDetails.room?.status === 'CRITERIA_REVIEW') && (
+                    <section className="mb-6 rounded-2xl border border-indigo-200 bg-white shadow-sm overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => toggleIdeaExpanded('stage2_all_ideas')}
+                        className="w-full px-5 py-4 flex items-center justify-between gap-4 text-left hover:bg-indigo-50/60 transition"
+                        aria-expanded={Boolean(expandedIdeaIds.stage2_all_ideas)}
+                        aria-controls="stage2-anonymous-ideas"
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-sm font-extrabold text-slate-900">익명 아이디어 전체 보기</span>
+                          <span className="block mt-1 text-xs text-slate-500">
+                            공개된 아이디어 {roomDetails.ideas.length}개를 이해한 뒤 공통 평가 기준을 제안해 주세요.
+                          </span>
+                        </span>
+                        {expandedIdeaIds.stage2_all_ideas
+                          ? <ChevronUp className="w-5 h-5 text-indigo-600 shrink-0" />
+                          : <ChevronDown className="w-5 h-5 text-indigo-600 shrink-0" />}
+                      </button>
+
+                      {expandedIdeaIds.stage2_all_ideas && (
+                        <div id="stage2-anonymous-ideas" className="border-t border-indigo-100 bg-slate-50/60 p-4 md:p-5 space-y-4">
+                          {roomDetails.ideas.map(idea => {
+                            const ideaAttachments = getIdeaAttachments(idea);
+                            return (
+                              <article key={idea.id} className="rounded-2xl border border-slate-200 bg-white p-4 md:p-5 space-y-3">
+                                <div>
+                                  <h3 className="text-sm font-extrabold text-slate-900">{idea.title}</h3>
+                                  <p className="mt-2 text-xs text-slate-600 whitespace-pre-line leading-relaxed">{idea.description}</p>
+                                </div>
+
+                                {(idea.attachmentUrl || ideaAttachments.length > 0 || idea.pdfAttachmentUrl) && (
+                                  <div className="pt-3 border-t border-slate-100 space-y-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      {idea.attachmentUrl && (
+                                        <button
+                                          type="button"
+                                          onClick={() => openReferencePreview(idea.attachmentUrl!)}
+                                          className="min-h-9 px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50 text-[11px] font-extrabold text-indigo-700 hover:bg-indigo-100"
+                                        >
+                                          참고 링크 열기 · {getReferenceLinkHost(idea.attachmentUrl)}
+                                        </button>
+                                      )}
+                                      {ideaAttachments.length > 0 && (
+                                        <span className="min-h-9 px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-[11px] font-extrabold text-slate-700">
+                                          📎 참고 자료 {ideaAttachments.length}개
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {ideaAttachments.length > 0 && (
+                                      <div className="space-y-2">
+                                        {ideaAttachments.map((attachment, attachmentIndex) => (
+                                          <div key={attachment.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                                            <span className="text-[11px] font-bold text-slate-600">참고 자료 {attachmentIndex + 1} · {formatPdfSize(attachment.fileSize)}</span>
+                                            <span className="inline-flex items-center gap-2">
+                                              <button type="button" onClick={() => openIdeaAttachment(idea.id, attachment)} className="text-[11px] font-extrabold text-indigo-600 hover:text-indigo-800">보기</button>
+                                              <button type="button" onClick={() => openIdeaAttachment(idea.id, attachment, true)} className="text-[11px] font-extrabold text-indigo-600 hover:text-indigo-800">다운로드</button>
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </article>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
+                  )}
 
                   {/* -----------------------------------------------------------
                     VIEW 2: CRITERIA_PROPOSAL
@@ -6937,7 +7031,7 @@ export default function App() {
                                             <p className="text-xs font-bold text-slate-800">{idea.title}</p>
                                             <p className="text-xs text-slate-600 whitespace-pre-line leading-relaxed">{idea.description}</p>
                                           </div>
-                                          {(idea.attachmentUrl || idea.pdfAttachmentPath || idea.pdfAttachmentUrl) && (
+                                          {(idea.attachmentUrl || getIdeaAttachments(idea).length > 0 || idea.pdfAttachmentUrl) && (
                                             <div className="border-t border-slate-200 pt-3 space-y-2">
                                               <p className="text-[10px] font-black text-slate-500">평가 참고 자료</p>
                                               <div className="flex flex-wrap gap-2">
@@ -6950,15 +7044,13 @@ export default function App() {
                                                     참고 링크 · {getReferenceLinkHost(idea.attachmentUrl)} ↗
                                                   </button>
                                                 )}
-                                                {idea.pdfAttachmentPath ? (
-                                                  <button
-                                                    type="button"
-                                                    onClick={() => openIdeaPdf(idea.id)}
-                                                    className="min-h-9 px-3 py-2 rounded-xl border border-slate-300 bg-white text-[11px] font-extrabold text-slate-700 hover:bg-slate-100"
-                                                  >
-                                                    PDF 참고 자료 열기 ↗
-                                                  </button>
-                                                ) : idea.pdfAttachmentUrl ? (
+                                                {getIdeaAttachments(idea).length > 0 ? getIdeaAttachments(idea).map(attachment => (
+                                                  <span key={attachment.id} className="inline-flex items-center gap-2 min-h-9 px-3 py-2 rounded-xl border border-slate-300 bg-white text-[11px] font-extrabold text-slate-700">
+                                                    <span>{attachment.originalName}</span>
+                                                    <button type="button" onClick={() => openIdeaAttachment(idea.id, attachment)} className="text-indigo-600">보기</button>
+                                                    <button type="button" onClick={() => openIdeaAttachment(idea.id, attachment, true)} className="text-indigo-600">다운로드</button>
+                                                  </span>
+                                                )) : idea.pdfAttachmentUrl ? (
                                                   <span className="min-h-9 px-3 py-2 rounded-xl border border-slate-200 bg-slate-100 text-[11px] font-bold text-slate-500">
                                                     기존 PDF 기록 · 실제 파일 없음
                                                   </span>
