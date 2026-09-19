@@ -5918,7 +5918,10 @@ app.post('/api/rooms/:id/ideas/:ideaId/attachments/finalize', async (req: Authen
     .select('id', { count: 'exact', head: true })
     .eq('room_id', id)
     .eq('idea_id', ideaId);
-  if (countError) return res.status(503).json({ error: '참고 자료 개수를 확인하지 못했습니다.' });
+  if (countError) {
+    await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
+    return res.status(503).json({ error: '참고 자료 개수를 확인하지 못했습니다.' });
+  }
   if ((attachmentCount || 0) >= 3) {
     await supabase.storage.from(IDEA_REFERENCE_BUCKET).remove([objectPath]);
     return res.status(409).json({ error: '참고 자료는 아이디어당 최대 3개까지 첨부할 수 있습니다.' });

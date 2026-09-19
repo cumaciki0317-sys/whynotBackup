@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -82,6 +82,14 @@ type RefinementState = {
     concernText: string;
     suggestionText: string;
   }>>;
+};
+
+type IdeaSaveProgress = {
+  mode: 'CREATE' | 'UPDATE';
+  ideaId?: string;
+  phase: 'SAVING' | 'UPLOADING' | 'COMPLETE';
+  completed: number;
+  total: number;
 };
 
 function getRoomStageLabel(status: RoomStatus): string {
@@ -568,6 +576,7 @@ export default function App() {
   const [editIdeaReferenceFiles, setEditIdeaReferenceFiles] = useState<File[]>([]);
   const [isIdeaSubmitBusy, setIsIdeaSubmitBusy] = useState(false);
   const [busyIdeaMutationId, setBusyIdeaMutationId] = useState<string | null>(null);
+  const [ideaSaveProgress, setIdeaSaveProgress] = useState<IdeaSaveProgress | null>(null);
 
 
 
@@ -1933,9 +1942,23 @@ export default function App() {
     if (!valid) throw new Error('실제 PDF, PNG, JPG 파일만 첨부할 수 있습니다.');
   };
 
-  const uploadIdeaReference = async (ideaId: string, file: File) => {
+  const createIdeaReferenceStorageClient = () => {
+    const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim();
+    const supabaseAnonKey = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    if (!supabaseUrl || !supabaseAnonKey) {
+      throw new Error('참고 자료 업로드용 Supabase 환경 설정을 확인해 주세요.');
+    }
+    return createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+  };
+
+  const uploadIdeaReference = async (
+    ideaId: string,
+    file: File,
+    storageClient: SupabaseClient<any>
+  ) => {
     if (!activeRoomId) throw new Error('회의실 정보를 찾을 수 없습니다.');
-    await validateReferenceFile(file);
     const ticketResponse = await apiFetch(`/api/rooms/${activeRoomId}/ideas/${ideaId}/attachments/upload-ticket`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1946,14 +1969,6 @@ export default function App() {
 
     // Signed upload token을 사용해 브라우저가 Storage로 직접 업로드합니다.
     // 파일 본문은 Vercel/Express 서버를 통과하지 않습니다.
-    const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim();
-    const supabaseAnonKey = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
-    if (!supabaseUrl || !supabaseAnonKey) {
-      throw new Error('참고 자료 업로드용 Supabase 환경 설정을 확인해 주세요.');
-    }
-    const storageClient = createClient(supabaseUrl, supabaseAnonKey, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
-    });
     const { error: uploadError } = await storageClient.storage
       .from('idea-pdfs')
       .uploadToSignedUrl(ticket.path, ticket.token, file, {
@@ -1970,6 +1985,55 @@ export default function App() {
     const finalized = await finalizeResponse.json().catch(() => ({}));
     if (!finalizeResponse.ok) throw new Error(finalized?.error || '참고 자료 첨부를 완료하지 못했습니다.');
     return finalized;
+  };
+
+  const uploadIdeaReferences = async (
+    ideaId: string,
+    files: File[],
+    onCompleted: (completed: number, total: number) => void
+  ) => {
+    if (files.length === 0) return;
+    if (files.length > 3) throw new Error('참고 자료는 아이디어당 최대 3개까지 첨부할 수 있습니다.');
+
+    await Promise.all(files.map(file => validateReferenceFile(file)));
+    const storageClient = createIdeaReferenceStorageClient();
+    const uploadStartedAt = performance.now();
+    let completed = 0;
+    const results = await Promise.allSettled(files.map(async file => {
+      try {
+        const result = await uploadIdeaReference(ideaId, file, storageClient);
+        completed += 1;
+        onCompleted(completed, files.length);
+        return result;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : '알 수 없는 오류';
+        throw new Error(`${file.name}: ${reason}`);
+      }
+    }));
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map(result => result.reason instanceof Error ? result.reason.message : String(result.reason));
+    console.info('[IDEA_REFERENCE_UPLOAD]', {
+      fileCount: files.length,
+      completedCount: completed,
+      failedCount: failures.length,
+      durationMs: Math.round(performance.now() - uploadStartedAt)
+    });
+    if (failures.length > 0) {
+      throw new Error(`참고 자료 업로드 실패\n${failures.join('\n')}`);
+    }
+  };
+
+  const getIdeaSaveProgressLabel = (mode: 'CREATE' | 'UPDATE', ideaId?: string) => {
+    const progress = ideaSaveProgress;
+    if (!progress || progress.mode !== mode || (mode === 'UPDATE' && progress.ideaId !== ideaId)) {
+      return mode === 'CREATE' ? '아이디어 올리기 (익명)' : '저장';
+    }
+    if (progress.phase === 'SAVING') return '아이디어 저장 중…';
+    if (progress.phase === 'UPLOADING') {
+      return `참고자료 업로드 중… ${progress.completed}/${progress.total} 완료`;
+    }
+    return mode === 'CREATE' ? '등록 완료' : '수정 완료';
   };
 
   const getIdeaAttachments = (idea: Idea): IdeaAttachment[] => idea.attachments || [];
@@ -2844,6 +2908,7 @@ export default function App() {
     };
 
     setIsIdeaSubmitBusy(true);
+    setIdeaSaveProgress({ mode: 'CREATE', phase: 'SAVING', completed: 0, total: ideaReferenceFiles.length });
     try {
       const response = await apiFetch(`/api/rooms/${activeRoomId}/ideas`, {
         method: 'POST',
@@ -2856,9 +2921,10 @@ export default function App() {
       }
       if (ideaReferenceFiles.length > 0) {
         try {
-          for (const file of ideaReferenceFiles) {
-            await uploadIdeaReference(String(data?.id || ''), file);
-          }
+          setIdeaSaveProgress({ mode: 'CREATE', phase: 'UPLOADING', completed: 0, total: ideaReferenceFiles.length });
+          await uploadIdeaReferences(String(data?.id || ''), ideaReferenceFiles, (completed, total) => {
+            setIdeaSaveProgress({ mode: 'CREATE', phase: 'UPLOADING', completed, total });
+          });
         } catch (pdfError) {
           if (data?.id) {
             await apiFetch(`/api/rooms/${activeRoomId}/ideas/${data.id}`, { method: 'DELETE' }).catch(() => null);
@@ -2866,21 +2932,21 @@ export default function App() {
           throw pdfError;
         }
       }
+      setIdeaSaveProgress({ mode: 'CREATE', phase: 'COMPLETE', completed: ideaReferenceFiles.length, total: ideaReferenceFiles.length });
+      setIdeaTitle('');
+      setIdeaDesc('');
+      setIdeaLink('');
+      setIdeaReferenceFiles([]);
+      setIdeaTags('');
+      await fetchRoomDetails(activeRoomId!);
+      triggerToast(`아이디어가 익명(${anonLabel})으로 성공적으로 등록되었습니다!`);
     } catch (error) {
       console.error('Idea submission failed:', error);
       triggerToast(error instanceof Error ? error.message : '아이디어를 등록하지 못했습니다.', 'error');
-      return;
     } finally {
       setIsIdeaSubmitBusy(false);
+      setIdeaSaveProgress(null);
     }
-
-    triggerToast(`아이디어가 익명(${anonLabel})으로 성공적으로 등록되었습니다!`);
-    setIdeaTitle('');
-    setIdeaDesc('');
-    setIdeaLink('');
-    setIdeaReferenceFiles([]);
-    setIdeaTags('');
-    await fetchRoomDetails(activeRoomId!);
   };
 
   // Update Idea Handler
@@ -2895,6 +2961,8 @@ export default function App() {
     }
     if (busyIdeaMutationId === ideaId) return;
     setBusyIdeaMutationId(ideaId);
+    setIdeaSaveProgress({ mode: 'UPDATE', ideaId, phase: 'SAVING', completed: 0, total: editIdeaReferenceFiles.length });
+    let ideaBodySaved = false;
 
     try {
       const res = await apiFetch(`/api/rooms/${activeRoomId}/ideas/${ideaId}`, {
@@ -2908,29 +2976,27 @@ export default function App() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.error || '아이디어를 수정하지 못했습니다.');
+      ideaBodySaved = true;
       if (editIdeaReferenceFiles.length > 0) {
-        try {
-          for (const file of editIdeaReferenceFiles) {
-            await uploadIdeaReference(ideaId, file);
-          }
-        } catch (pdfError) {
-          triggerToast('아이디어 내용은 저장되었지만 일부 참고 자료 업로드에 실패했습니다.', 'error');
-          if (activeRoomId) await fetchRoomDetails(activeRoomId, true);
-          return;
-        }
+        setIdeaSaveProgress({ mode: 'UPDATE', ideaId, phase: 'UPLOADING', completed: 0, total: editIdeaReferenceFiles.length });
+        await uploadIdeaReferences(ideaId, editIdeaReferenceFiles, (completed, total) => {
+          setIdeaSaveProgress({ mode: 'UPDATE', ideaId, phase: 'UPLOADING', completed, total });
+        });
       }
+      setIdeaSaveProgress({ mode: 'UPDATE', ideaId, phase: 'COMPLETE', completed: editIdeaReferenceFiles.length, total: editIdeaReferenceFiles.length });
+      setEditIdeaReferenceFiles([]);
+      setEditingIdeaId(null);
+      if (activeRoomId) await fetchRoomDetails(activeRoomId, true);
+      triggerToast('아이디어가 성공적으로 수정되었습니다.');
     } catch (error) {
       console.error('Idea update failed:', error);
-      triggerToast(error instanceof Error ? error.message : '아이디어를 수정하지 못했습니다.', 'error');
-      return;
+      if (ideaBodySaved && activeRoomId) await fetchRoomDetails(activeRoomId, true);
+      const errorMessage = error instanceof Error ? error.message : '아이디어를 수정하지 못했습니다.';
+      triggerToast(ideaBodySaved ? `아이디어 내용은 저장되었습니다.\n${errorMessage}` : errorMessage, 'error');
     } finally {
       setBusyIdeaMutationId(current => current === ideaId ? null : current);
+      setIdeaSaveProgress(null);
     }
-
-    triggerToast('아이디어가 성공적으로 수정되었습니다.');
-    setEditIdeaReferenceFiles([]);
-    setEditingIdeaId(null);
-    if (activeRoomId) await fetchRoomDetails(activeRoomId, true);
   };
 
   // Delete Idea Handler
@@ -6221,7 +6287,7 @@ export default function App() {
                                                 return;
                                               }
                                               try {
-                                                for (const file of files) await validateReferenceFile(file);
+                                                await Promise.all(files.map(file => validateReferenceFile(file)));
                                                 setEditIdeaReferenceFiles(current => [...current, ...files]);
                                               } catch (error) {
                                                 triggerToast(error instanceof Error ? error.message : '참고 자료를 확인해 주세요.', 'error');
@@ -6256,7 +6322,7 @@ export default function App() {
                                         disabled={busyIdeaMutationId === idea.id}
                                         className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition shadow-sm"
                                       >
-                                        {busyIdeaMutationId === idea.id ? '저장 중…' : '저장'}
+                                        {busyIdeaMutationId === idea.id ? getIdeaSaveProgressLabel('UPDATE', idea.id) : '저장'}
                                       </button>
                                     </div>
                                   </motion.div>
@@ -6455,7 +6521,7 @@ export default function App() {
                                       return;
                                     }
                                     try {
-                                      for (const file of files) await validateReferenceFile(file);
+                                      await Promise.all(files.map(file => validateReferenceFile(file)));
                                       setIdeaReferenceFiles(current => [...current, ...files]);
                                     } catch (error) {
                                       triggerToast(error instanceof Error ? error.message : '참고 자료를 확인해 주세요.', 'error');
@@ -6483,7 +6549,7 @@ export default function App() {
                               disabled={isIdeaSubmitBusy || (roomDetails.ideas || []).filter(i => i.submitterId === userId).length >= 3}
                               className="w-full py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition shadow-sm"
                             >
-                              {isIdeaSubmitBusy ? '아이디어 등록 중…' : '아이디어 올리기 (익명)'}
+                              {isIdeaSubmitBusy ? getIdeaSaveProgressLabel('CREATE') : '아이디어 올리기 (익명)'}
                             </button>
 
                             {(roomDetails.ideas || []).length >= 1 && (
