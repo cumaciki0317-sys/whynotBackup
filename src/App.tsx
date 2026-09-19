@@ -727,8 +727,11 @@ export default function App() {
     rouletteWheelAnimationRef.current = null;
     rouletteRevealBlockedRef.current = false;
     winnerAnnouncementPendingRef.current = false;
+    roulettePresentationLockRef.current = false;
+    pendingRouletteRoomDetailsRef.current = null;
     setIsSpinningRoulette(false);
     setIsRouletteSettling(false);
+    setRouletteSettleDurationMs(2200);
     setRouletteWinnerResult(null);
     setRouletteDisplayCandidates([]);
     setIsTieRouletteServerComplete(false);
@@ -788,6 +791,7 @@ export default function App() {
   const [showRouletteModal, setShowRouletteModal] = useState(false);
   const [isSpinningRoulette, setIsSpinningRoulette] = useState(false);
   const [isRouletteSettling, setIsRouletteSettling] = useState(false);
+  const [rouletteSettleDurationMs, setRouletteSettleDurationMs] = useState(2200);
   const [rouletteWinnerResult, setRouletteWinnerResult] = useState<string | null>(null);
   const [rouletteRotation, setRouletteRotation] = useState(0);
   const [roulettePurpose, setRoulettePurpose] = useState<'PREVIEW' | 'TIE_RESOLUTION'>('PREVIEW');
@@ -797,6 +801,8 @@ export default function App() {
   const rouletteWheelAnimationRef = useRef<Animation | null>(null);
   const rouletteRevealBlockedRef = useRef(false);
   const winnerAnnouncementPendingRef = useRef(false);
+  const roulettePresentationLockRef = useRef(false);
+  const pendingRouletteRoomDetailsRef = useRef<RoomDetails | null>(null);
 
   // Room Settings Edit Modal States (Host only)
   const [showRoomSettingsModal, setShowRoomSettingsModal] = useState(false);
@@ -2322,9 +2328,18 @@ export default function App() {
           roomStateVersionRef.current = String(data.room.stateVersion || '1');
         }
 
-        // The authenticated server response is authoritative. Preserving an
-        // older local status or deleted rows here causes host/member divergence.
-        setRoomDetails(data);
+        // Keep receiving authoritative polling data during the host roulette,
+        // but defer only the final presentation transition until the host
+        // confirms the stopped wheel result inside the modal.
+        const isFinalPresentationState =
+          data.room.status === 'CLOSED' ||
+          data.room.finalVoteStatus === 'FINALIZED' ||
+          data.finalVoteCycle?.status === 'COMPLETED';
+        if (roulettePresentationLockRef.current && isFinalPresentationState) {
+          pendingRouletteRoomDetailsRef.current = data;
+        } else {
+          setRoomDetails(data);
+        }
         const boundaryRunoff = (data as any).boundaryRunoff;
         if (boundaryRunoff?.status === 'VOTING') {
           const runoffCandidateIds = Array.isArray(boundaryRunoff.candidateIdeaIds)
@@ -4202,6 +4217,7 @@ export default function App() {
   // Roulette spin handler
   const handleSpinRoulette = async () => {
     if (isSpinningRoulette || rouletteCandidateIdeas.length === 0) return;
+    const spinStartedAt = performance.now();
     const spinCandidates = [...rouletteCandidateIdeas];
     const wheelElement = rouletteWheelRef.current;
 
@@ -4212,6 +4228,8 @@ export default function App() {
     setRouletteWinnerResult(null);
     if (roulettePurpose === 'TIE_RESOLUTION') {
       rouletteRevealBlockedRef.current = true;
+      roulettePresentationLockRef.current = true;
+      pendingRouletteRoomDetailsRef.current = null;
       winnerAnnouncementPendingRef.current = false;
       setShowWinnerModal(false);
     }
@@ -4223,12 +4241,11 @@ export default function App() {
         { transform: `rotate(${rouletteRotation}deg)` },
         { transform: `rotate(${rouletteRotation + 360}deg)` }
       ],
-      { duration: 700, iterations: Infinity, easing: 'linear' }
+      { duration: 450, iterations: Infinity, easing: 'linear' }
     ) || null;
 
     const N = spinCandidates.length;
     const sliceAngle = 360 / N;
-    let roomRefreshPromise: Promise<void> | null = null;
 
     let randomIndex = Math.floor(Math.random() * N);
     let chosenIdea = spinCandidates[randomIndex];
@@ -4237,6 +4254,8 @@ export default function App() {
         rouletteWheelAnimationRef.current?.cancel();
         rouletteWheelAnimationRef.current = null;
         rouletteRevealBlockedRef.current = false;
+        roulettePresentationLockRef.current = false;
+        pendingRouletteRoomDetailsRef.current = null;
         setIsSpinningRoulette(false);
         return;
       }
@@ -4261,11 +4280,13 @@ export default function App() {
           Number(data.remainingDrawCount) === 0 ||
           Number(roomDetails?.finalVoteCycle?.nextRouletteDrawNumber || 0) >= requiredTieRouletteDraws
         );
-        roomRefreshPromise = fetchRoomDetails(activeRoomId, true);
+        void fetchRoomDetails(activeRoomId, true);
       } catch (error: any) {
         rouletteWheelAnimationRef.current?.cancel();
         rouletteWheelAnimationRef.current = null;
         rouletteRevealBlockedRef.current = false;
+        roulettePresentationLockRef.current = false;
+        pendingRouletteRoomDetailsRef.current = null;
         setIsSpinningRoulette(false);
         setIsRouletteSettling(false);
         triggerToast(error.message || '동률 추첨에 실패했습니다.', 'error');
@@ -4290,7 +4311,8 @@ export default function App() {
     // Calculate base rotation to align target angle to top pointer (360 - svgPointerStopAngle)
     const normalizedStopAngle = (360 - svgPointerStopAngle + 360) % 360;
 
-    // Calculate next cumulative rotation (minimum 5 full extra spins = 1800 deg)
+    // Use a compact number of turns so the wheel remains energetic without
+    // making the result reveal feel delayed.
     let currentRot = rouletteRotation;
     if (wheelElement) {
       const computedTransform = window.getComputedStyle(wheelElement).transform;
@@ -4303,13 +4325,16 @@ export default function App() {
     rouletteWheelAnimationRef.current = null;
 
     const currentMod = currentRot % 360;
-    const additionalFullSpins = 360 * 5;
+    const additionalFullSpins = 360 * 3;
 
     let deltaAngle = (normalizedStopAngle - currentMod + 360) % 360;
     if (deltaAngle < 180) deltaAngle += 360; // Ensure minimum spin distance for visual feedback
 
     const newTargetRotation = currentRot + additionalFullSpins + deltaAngle;
 
+    const elapsedBeforeSettling = performance.now() - spinStartedAt;
+    const settleDurationMs = Math.max(800, Math.min(2200, 2200 - elapsedBeforeSettling));
+    setRouletteSettleDurationMs(settleDurationMs);
     setRouletteRotation(currentRot);
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     setIsRouletteSettling(true);
@@ -4317,8 +4342,7 @@ export default function App() {
 
     // The server may already be finalized, but the reveal remains blocked until
     // the user has seen a complete deceleration and confirms the modal result.
-    await new Promise(resolve => window.setTimeout(resolve, 3600));
-    if (roomRefreshPromise) await roomRefreshPromise;
+    await new Promise(resolve => window.setTimeout(resolve, settleDurationMs + 30));
     setIsRouletteSettling(false);
     setIsSpinningRoulette(false);
     setRouletteWinnerResult(chosenIdea.title);
@@ -4346,19 +4370,24 @@ export default function App() {
     if (!isFinalTieRouletteResultReady) return;
     rouletteWheelAnimationRef.current?.cancel();
     rouletteWheelAnimationRef.current = null;
+    const pendingRoomDetails = pendingRouletteRoomDetailsRef.current;
+    const revealedRoomDetails = pendingRoomDetails || roomDetails;
     setShowRouletteModal(false);
     setRouletteDisplayCandidates([]);
+    roulettePresentationLockRef.current = false;
+    pendingRouletteRoomDetailsRef.current = null;
     rouletteRevealBlockedRef.current = false;
+    if (pendingRoomDetails) setRoomDetails(pendingRoomDetails);
 
-    const roomId = roomDetails?.room.id;
-    const hasFinalWinner = (roomDetails?.ideas || []).some(idea => idea.status === 'WINNER');
+    const roomId = revealedRoomDetails?.room.id;
+    const hasFinalWinner = (revealedRoomDetails?.ideas || []).some(idea => idea.status === 'WINNER');
     const shouldRevealWinner = winnerAnnouncementPendingRef.current || (
-      roomDetails?.room.finalVoteStatus !== 'TIE_PENDING' && hasFinalWinner
+      revealedRoomDetails?.room.finalVoteStatus !== 'TIE_PENDING' && hasFinalWinner
     );
     winnerAnnouncementPendingRef.current = false;
     if (roomId && shouldRevealWinner) {
       hasShownWinnerModalRef.current.add(roomId);
-      setShowWinnerModal(true);
+      requestAnimationFrame(() => setShowWinnerModal(true));
     }
   };
 
@@ -9464,7 +9493,7 @@ export default function App() {
                   className="w-full h-full rounded-full border-4 border-slate-900 shadow-xl overflow-hidden relative transition-transform ease-out"
                   style={{
                     transform: `rotate(${rouletteRotation}deg)`,
-                    transitionDuration: isRouletteSettling ? '3.5s' : '0s',
+                    transitionDuration: isRouletteSettling ? `${rouletteSettleDurationMs}ms` : '0ms',
                     transitionTimingFunction: 'cubic-bezier(0.12, 0.72, 0.2, 1)'
                   }}
                 >
