@@ -99,6 +99,23 @@ function getRoomStageLabel(status: RoomStatus): string {
   }
 }
 
+function escapeMarkdownInline(value: unknown): string {
+  return String(value ?? '')
+    .replace(/\r?\n+/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/([`*_[\]<>#|])/g, '\\$1')
+    .trim();
+}
+
+function sanitizeDownloadFilename(value: string): string {
+  const sanitized = value
+    .replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/[. ]+$/g, '')
+    .trim();
+  return (sanitized || '의사결정회의록').slice(0, 80);
+}
+
 function toDateTimeLocalValue(value?: string): string {
   if (!value) return '';
   const trimmed = value.trim();
@@ -706,6 +723,16 @@ export default function App() {
   useEffect(() => {
     setMySelectedStarIdeaIds([]);
     setShowFinalVoteModal(false);
+    rouletteWheelAnimationRef.current?.cancel();
+    rouletteWheelAnimationRef.current = null;
+    rouletteRevealBlockedRef.current = false;
+    winnerAnnouncementPendingRef.current = false;
+    setIsSpinningRoulette(false);
+    setIsRouletteSettling(false);
+    setRouletteWinnerResult(null);
+    setRouletteDisplayCandidates([]);
+    setIsTieRouletteServerComplete(false);
+    setShowRouletteModal(false);
     if (!roomDetails || roomDetails.room.id !== activeRoomId) {
       roomStateVersionRef.current = null;
     }
@@ -760,9 +787,16 @@ export default function App() {
   // Roulette Preview Modal States (Test & Demo mode)
   const [showRouletteModal, setShowRouletteModal] = useState(false);
   const [isSpinningRoulette, setIsSpinningRoulette] = useState(false);
+  const [isRouletteSettling, setIsRouletteSettling] = useState(false);
   const [rouletteWinnerResult, setRouletteWinnerResult] = useState<string | null>(null);
   const [rouletteRotation, setRouletteRotation] = useState(0);
   const [roulettePurpose, setRoulettePurpose] = useState<'PREVIEW' | 'TIE_RESOLUTION'>('PREVIEW');
+  const [rouletteDisplayCandidates, setRouletteDisplayCandidates] = useState<Idea[]>([]);
+  const [isTieRouletteServerComplete, setIsTieRouletteServerComplete] = useState(false);
+  const rouletteWheelRef = useRef<HTMLDivElement | null>(null);
+  const rouletteWheelAnimationRef = useRef<Animation | null>(null);
+  const rouletteRevealBlockedRef = useRef(false);
+  const winnerAnnouncementPendingRef = useRef(false);
 
   // Room Settings Edit Modal States (Host only)
   const [showRoomSettingsModal, setShowRoomSettingsModal] = useState(false);
@@ -2348,8 +2382,13 @@ export default function App() {
           data?.room?.finalVoteStatus !== 'TIE_PENDING' &&
           hasFinalWinner;
         if (isWinnerState && !hasShownWinnerModalRef.current.has(data.room.id)) {
-          hasShownWinnerModalRef.current.add(data.room.id);
-          setShowWinnerModal(true);
+          if (rouletteRevealBlockedRef.current) {
+            winnerAnnouncementPendingRef.current = true;
+            setShowWinnerModal(false);
+          } else {
+            hasShownWinnerModalRef.current.add(data.room.id);
+            setShowWinnerModal(true);
+          }
         }
         console.log('[SYNC] 현재 단계 적용 완료');
         isFetched = true;
@@ -3850,6 +3889,59 @@ export default function App() {
     const candidateVoteSummary = candidateRows
       .map(idea => `${idea.title} ${roomDetails.starVotes?.[idea.id] || 0}표`)
       .join(', ');
+    const finalVoteCycle = roomDetails.finalVoteCycle;
+    const rouletteDraws = finalVoteCycle?.rouletteDraws || [];
+    const wasTieRevote = finalVoteCycle?.cycleKind === 'TIE_REVOTE';
+    const wasResolvedByRoulette = rouletteDraws.length > 0;
+    const recordedTieCandidateIds = (finalVoteCycle?.tieCandidateIdeaIds || []).length > 0
+      ? finalVoteCycle?.tieCandidateIdeaIds || []
+      : rouletteDraws[0]?.candidateIdeaIds || [];
+    const recordedTieCounts = recordedTieCandidateIds.map(ideaId => roomDetails.starVotes?.[ideaId] || 0);
+    const hasRecordedBoundaryTie = recordedTieCandidateIds.length > (finalVoteCycle?.tieSlots || 0) &&
+      recordedTieCounts.length > 1 &&
+      recordedTieCounts.every(count => count === recordedTieCounts[0]);
+    const finalVoteResultSummary = (finalVoteCycle || totalStars > 0) && candidateVoteSummary
+      ? `${candidateVoteSummary}${hasRecordedBoundaryTie ? ' (동률)' : ''}`
+      : '최종 투표 생략';
+    const tieResolutionSummary = wasResolvedByRoulette
+      ? [
+          wasTieRevote ? `동률 후보 ${finalVoteCycle?.candidateIdeaIds.length || 0}개 대상으로 전원 별 3개 재투표 진행 → 재동률 발생` : null,
+          finalVoteCycle?.consentedCount === finalVoteCycle?.expectedCount && (finalVoteCycle?.expectedCount || 0) > 0
+            ? `참여자 전원 룰렛 동의 → 동률 후보 ${recordedTieCandidateIds.length}개 중 룰렛 진행`
+            : `저장된 룰렛 동의 절차 완료 → 동률 후보 ${recordedTieCandidateIds.length}개 중 룰렛 진행`
+        ].filter(Boolean).join(' → ')
+      : wasTieRevote
+        ? `최종 선정 경계 동률 → 동률 후보 ${finalVoteCycle?.candidateIdeaIds.length || 0}개 대상으로 전원 별 3개 재투표 진행`
+        : null;
+    const rouletteResultSummary = wasResolvedByRoulette
+      ? rouletteDraws
+          .map(draw => allIdeas.find(idea => idea.id === draw.selectedIdeaId)?.title)
+          .filter((title): title is string => Boolean(title))
+          .join(', ')
+      : null;
+    const allRouletteParticipantsConsented = Boolean(
+      finalVoteCycle &&
+      finalVoteCycle.expectedCount > 0 &&
+      finalVoteCycle.consentedCount === finalVoteCycle.expectedCount
+    );
+    const finalVoteWasSkipped = !finalVoteCycle && totalStars === 0;
+    const finalVoteActivity = finalVoteWasSkipped
+      ? '최종 투표 대상 수와 선정 수가 같아 최종 별투표를 생략했습니다.'
+      : wasTieRevote && wasResolvedByRoulette
+        ? `참여자별 별 3개를 익명으로 배정했습니다. 최종 선정 경계 동률로 동률 후보 대상 별 재투표를 진행했고, 재동률 후 ${allRouletteParticipantsConsented ? '참여자 전원 동의로 ' : ''}룰렛을 진행했습니다.`
+        : wasTieRevote
+          ? '참여자별 별 3개를 익명으로 배정했습니다. 최종 선정 경계 동률 발생 후 동률 후보만 대상으로 전원 별 3개 재투표를 진행했습니다.'
+          : wasResolvedByRoulette
+            ? `참여자별 별 3개를 익명으로 배정했습니다. 동률 발생 후 ${allRouletteParticipantsConsented ? '참여자 전원 동의로 ' : ''}룰렛을 진행했습니다.`
+            : '참여자별 별 3개를 익명으로 배정했습니다.';
+    const finalResultActivity = wasResolvedByRoulette
+      ? '동률 후보 룰렛 결과를 반영해 최종 결과를 확정했습니다.'
+      : wasTieRevote
+        ? '동률 후보 별 재투표 결과를 반영해 최종 결과를 확정했습니다.'
+        : finalVoteWasSkipped
+          ? '투표 생략 조건에 따라 최종 결과를 확정했습니다.'
+          : '평가와 최종 투표 결과를 확정했습니다.';
+    const finalResultSummary = `${winnerNames} 최종 선정${wasResolvedByRoulette ? ' (룰렛)' : wasTieRevote ? ' (별 재투표)' : ''}`;
     const selectedReasons = winners.map(winner => {
       const voteCount = roomDetails.starVotes?.[winner.id] || 0;
       return `${winner.title}은(는) 최종 익명 누적 투표에서 ${voteCount}표를 받아 최종 선정되었습니다.`;
@@ -3876,18 +3968,21 @@ export default function App() {
     const actionItems = report?.suggestedActionItems?.length
       ? report.suggestedActionItems
       : fallbackActionItems;
+    const confirmedCriteriaCount = (roomDetails.criteria || []).filter(criterion => criterion.confirmed).length;
+    const criteriaEligibleCount = participantNames.length || roomDetails.participantCount || 0;
+    const criteriaCompletedCount = roomDetails.criteriaCompletedParticipantsCount || 0;
     const decisionSteps = room.decisionMode === 'QUICK'
       ? [
           ['1단계 선택지', `${participantNames.length || roomDetails.participantCount || 0}명 참여`, '참여자가 선택지를 등록했습니다.', `후보 ${allIdeas.length}개 등록`],
-          ['2단계 익명투표', `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, '다른 사람의 선택을 보지 않고 별을 배정했습니다.', candidateVoteSummary || '투표 결과 없음'],
-          ['3단계 최종결과', '전원 제출 후 공개', '서버가 최종 결과를 확정했습니다.', `${winnerNames} 선정`]
+          ['2단계 익명투표', finalVoteWasSkipped ? '최종 투표 생략' : `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, finalVoteActivity, finalVoteResultSummary],
+          ['3단계 최종 결과', '최종 결과 확정', finalResultActivity, finalResultSummary]
         ]
       : [
           ['1단계 아이디어', `${participantNames.length || roomDetails.participantCount || 0}명 참여`, '참여자가 익명으로 아이디어를 제안했습니다.', `후보 ${allIdeas.length}개 등록`],
-          ['2단계 기준설정', `${roomDetails.criteriaApproval?.approveCount || participantNames.length || 0}/${roomDetails.criteriaApproval?.eligibleCount || participantNames.length || 0}명 승인`, '제안된 기준을 검토하고 공통 평가 기준을 확정했습니다.', `평가 기준 ${(roomDetails.criteria || []).filter(criterion => criterion.confirmed).length}개 확정`],
+          ['2단계 평가 기준 설정', `${criteriaCompletedCount}/${criteriaEligibleCount}명 제안 완료`, '참여자들이 익명으로 평가 기준을 제안하고 공통 평가 기준을 검토했습니다.', `평가 기준 ${confirmedCriteriaCount}개 · 방장 최종 확정`],
           ['3단계 점수·피드백', `${roomDetails.evaluationSubmittedCount || roomDetails.evaluatorsCount || 0}/${roomDetails.evaluationExpectedCount || participantNames.length || 0}명 완료`, '자기 아이디어를 제외하고 익명 평가했습니다.', candidateScoreSummary || '점수 평가 완료'],
-          ['4단계 최종 별투표', `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, '참여자별 별 3개를 익명으로 배정했습니다.', candidateVoteSummary || '투표 결과 없음'],
-          ['5단계 최종결과', '전원 제출 후 공개', '평가와 최종 투표 결과를 확정했습니다.', `${winnerNames} 선정`]
+          ['4단계 최종 별투표', finalVoteWasSkipped ? '최종 투표 생략' : `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, finalVoteActivity, finalVoteResultSummary],
+          ['5단계 최종 결과', '최종 결과 확정', finalResultActivity, finalResultSummary]
         ];
 
     return {
@@ -3902,6 +3997,10 @@ export default function App() {
       decisionPeriod,
       winnerNames,
       candidateVoteSummary,
+      finalVoteResultSummary,
+      tieResolutionSummary,
+      rouletteResultSummary: rouletteResultSummary ? `${rouletteResultSummary} 선정` : null,
+      confirmedCriteriaCount,
       selectedReasons,
       majorConcerns: report?.majorConcerns || [],
       unverifiedAssumptions: report?.unverifiedAssumptions || [],
@@ -3923,6 +4022,120 @@ export default function App() {
       window.print();
       window.setTimeout(restoreTitle, 1000);
     }, 500);
+  };
+
+  const handleDownloadMarkdown = () => {
+    if (!meetingMinutes) return;
+
+    const md = escapeMarkdownInline;
+    const isQuick = meetingMinutes.room.decisionMode === 'QUICK';
+    const criteriaSectionNumber = 4;
+    const candidateSectionNumber = isQuick ? 4 : 5;
+    const evidenceSectionNumber = isQuick ? 5 : 6;
+    const historySectionNumber = isQuick ? 6 : 7;
+    const actionSectionNumber = isQuick ? 7 : 8;
+    const lines: string[] = [
+      '# WhyNot 의사결정 회의록',
+      '',
+      `## 1. 회의 기본 정보`,
+      `- 회의명: ${md(meetingMinutes.room.title)}`,
+      `- 의사결정 방식: ${meetingMinutes.room.decisionMode === 'QUICK' ? 'WhyNot 빠른 결정' : 'WhyNot 근거 기반 결정'}`,
+      `- 결정 기간: ${md(meetingMinutes.decisionPeriod)}`,
+      `- 방장: ${md(meetingMinutes.hostName)}`,
+      `- 참여자: ${meetingMinutes.participantNames.length || roomDetails?.participantCount || 0}명${meetingMinutes.participantNames.length > 0 ? ` (${meetingMinutes.participantNames.map(md).join(', ')})` : ''}`,
+      `- 외부 투표자: ${meetingMinutes.externalVoterCount}명`,
+      `- 최종 선정 수: ${meetingMinutes.room.targetWinnerCount || 1}개`
+    ];
+    if (meetingMinutes.room.description?.trim()) {
+      lines.push(`- 회의 설명: ${md(meetingMinutes.room.description)}`);
+    }
+
+    lines.push(
+      '',
+      '## 2. 회의 안건',
+      `- 주요 안건: ${md(meetingMinutes.room.title)}`,
+      `- 검토 후보: ${meetingMinutes.candidateRows.map(idea => md(idea.title)).join(', ')}`,
+      `- 결정 목표: 검토 후보 중 최종 실행 아이디어 ${meetingMinutes.room.targetWinnerCount || 1}개 선정`,
+      '',
+      '## 3. 최종 의사결정',
+      `- 최종 선정안: ${md(meetingMinutes.winnerNames)}`,
+      `- 실행 내용: ${meetingMinutes.winners.map(winner => `${md(winner.title)}: ${md(winner.description)}`).join(' / ')}`,
+      `- 최종 투표 결과: ${md(meetingMinutes.finalVoteResultSummary)}`
+    );
+    if (meetingMinutes.tieResolutionSummary) {
+      lines.push(`- 동률 처리: ${md(meetingMinutes.tieResolutionSummary)}`);
+    }
+    if (meetingMinutes.rouletteResultSummary) {
+      lines.push(`- 룰렛 결과: ${md(meetingMinutes.rouletteResultSummary)}`);
+    }
+    lines.push(`- 최종 결론: ${md(meetingMinutes.winnerNames)}을(를) 최종 실행안으로 선정합니다.`);
+
+    if (!isQuick) {
+      lines.push('', `## ${criteriaSectionNumber}. 확정 평가 기준`);
+      const confirmedCriteria = (roomDetails?.criteria || []).filter(criterion => criterion.confirmed);
+      if (confirmedCriteria.length > 0) {
+        confirmedCriteria.forEach((criterion, index) => {
+          lines.push(`${index + 1}. **${md(criterion.name)}**: ${md(criterion.description)}`);
+        });
+      } else {
+        lines.push('- 확정된 평가 기준 없음');
+      }
+    }
+
+    lines.push('', `## ${candidateSectionNumber}. 후보별 평가 결과`);
+    meetingMinutes.candidateRows.forEach(idea => {
+      const score = meetingMinutes.scoreForIdea(idea.id);
+      lines.push(`### ${md(idea.title)}`);
+      lines.push(`- 제안 내용: ${md(idea.description)}`);
+      if (!isQuick) lines.push(`- 평가 점수: ${score === undefined ? '-' : `${Number(score).toLocaleString('ko-KR')}점`}`);
+      lines.push(`- 별 투표: ${roomDetails?.starVotes?.[idea.id] || 0}표`);
+      lines.push(`- 결과: ${idea.status === 'WINNER' ? '선정' : '미선정'}`, '');
+    });
+
+    lines.push(`## ${evidenceSectionNumber}. 주요 논의 및 판단 근거`);
+    const appendEvidence = (label: string, items: string[], fallback: string) => {
+      lines.push(`### ${label}`);
+      (items.length > 0 ? items : [fallback]).forEach(item => lines.push(`- ${md(item)}`));
+    };
+    appendEvidence('선정 근거', meetingMinutes.selectedReasons, '최종 투표 결과에 따라 선정되었습니다.');
+    appendEvidence('주요 우려', meetingMinutes.majorConcerns, '수집된 평가에서 반복적으로 확인된 주요 우려가 없습니다.');
+    appendEvidence('미확인 가정', meetingMinutes.unverifiedAssumptions, '현재 자료만으로 확인하기 어려운 가정은 실행 단계에서 별도로 확인해야 합니다.');
+    appendEvidence('후속 검증', meetingMinutes.validationTasks, '작은 범위의 실행 또는 사용자 테스트로 핵심 가정을 먼저 검증합니다.');
+
+    lines.push('', `## ${historySectionNumber}. 의사결정 진행 기록`);
+    meetingMinutes.decisionSteps.forEach(([step, participation, activity, result]) => {
+      lines.push(
+        `### ${md(step)}`,
+        `- 참여 현황: ${md(participation)}`,
+        `- 진행 내용: ${md(activity)}`,
+        `- 결과: ${md(result)}`,
+        ''
+      );
+    });
+
+    lines.push(`## ${actionSectionNumber}. AI 제안 실행 과제 및 후속 조치`);
+    meetingMinutes.actionItems.forEach((item, index) => {
+      lines.push(
+        `${index + 1}. **${md(item.title)}**`,
+        `   - 완료 기준: ${md(item.completionCriteria)}`,
+        '   - 담당자: 추후 확정',
+        '   - 완료 기한: 추후 확정',
+        '   - 상태: 논의 필요'
+      );
+    });
+
+    lines.push('', '---', `회의 ID: ${md(meetingMinutes.room.id)}`, 'WhyNot에서 생성된 의사결정 기록');
+    const markdown = `${lines.join('\n').trim()}\n`;
+    const blob = new Blob(['\uFEFF', markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `WhyNot_${sanitizeDownloadFilename(meetingMinutes.room.title)}_회의록.md`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    triggerToast('📝 Markdown 의사결정 회의록을 다운로드했습니다.');
   };
 
   const handleStartBoundaryRoulette = async () => {
@@ -3977,19 +4190,53 @@ export default function App() {
     ];
   }, [roomDetails, roulettePurpose]);
 
+  const completedTieRouletteDraws = roomDetails?.finalVoteCycle?.rouletteDraws.length || 0;
+  const requiredTieRouletteDraws = roomDetails?.finalVoteCycle?.tieSlots || 0;
+  const remainingTieRouletteDraws = Math.max(0, requiredTieRouletteDraws - completedTieRouletteDraws);
+  const tieRouletteActionLabel = completedTieRouletteDraws > 0
+    ? '다음 룰렛 돌리기'
+    : requiredTieRouletteDraws === 1
+      ? '룰렛 돌리기'
+      : '1번째 룰렛 돌리기';
+
   // Roulette spin handler
   const handleSpinRoulette = async () => {
     if (isSpinningRoulette || rouletteCandidateIdeas.length === 0) return;
-    setIsSpinningRoulette(true);
-    setRouletteWinnerResult(null);
+    const spinCandidates = [...rouletteCandidateIdeas];
+    const wheelElement = rouletteWheelRef.current;
 
-    const N = rouletteCandidateIdeas.length;
+    setRouletteDisplayCandidates(spinCandidates);
+    setIsTieRouletteServerComplete(false);
+    setIsSpinningRoulette(true);
+    setIsRouletteSettling(false);
+    setRouletteWinnerResult(null);
+    if (roulettePurpose === 'TIE_RESOLUTION') {
+      rouletteRevealBlockedRef.current = true;
+      winnerAnnouncementPendingRef.current = false;
+      setShowWinnerModal(false);
+    }
+
+    // Start visible motion before waiting for the authoritative server draw.
+    rouletteWheelAnimationRef.current?.cancel();
+    rouletteWheelAnimationRef.current = wheelElement?.animate(
+      [
+        { transform: `rotate(${rouletteRotation}deg)` },
+        { transform: `rotate(${rouletteRotation + 360}deg)` }
+      ],
+      { duration: 700, iterations: Infinity, easing: 'linear' }
+    ) || null;
+
+    const N = spinCandidates.length;
     const sliceAngle = 360 / N;
+    let roomRefreshPromise: Promise<void> | null = null;
 
     let randomIndex = Math.floor(Math.random() * N);
-    let chosenIdea = rouletteCandidateIdeas[randomIndex];
+    let chosenIdea = spinCandidates[randomIndex];
     if (roulettePurpose === 'TIE_RESOLUTION') {
       if (!activeRoomId) {
+        rouletteWheelAnimationRef.current?.cancel();
+        rouletteWheelAnimationRef.current = null;
+        rouletteRevealBlockedRef.current = false;
         setIsSpinningRoulette(false);
         return;
       }
@@ -4004,12 +4251,23 @@ export default function App() {
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || '동률 추첨 결과를 저장하지 못했습니다.');
         const selectedId = data.randomlySelectedIdeaIds?.[0] || data.winnerIdeaIds?.[0];
-        const selectedIndex = rouletteCandidateIdeas.findIndex(idea => idea.id === selectedId);
+        const selectedIndex = spinCandidates.findIndex(idea => idea.id === selectedId);
         if (selectedIndex < 0) throw new Error('서버가 확정한 동률 후보를 화면에서 찾지 못했습니다.');
         randomIndex = selectedIndex;
-        chosenIdea = rouletteCandidateIdeas[selectedIndex];
+        chosenIdea = spinCandidates[selectedIndex];
+        setIsTieRouletteServerComplete(
+          data.finalized === true ||
+          data.status === 'COMPLETED' ||
+          Number(data.remainingDrawCount) === 0 ||
+          Number(roomDetails?.finalVoteCycle?.nextRouletteDrawNumber || 0) >= requiredTieRouletteDraws
+        );
+        roomRefreshPromise = fetchRoomDetails(activeRoomId, true);
       } catch (error: any) {
+        rouletteWheelAnimationRef.current?.cancel();
+        rouletteWheelAnimationRef.current = null;
+        rouletteRevealBlockedRef.current = false;
         setIsSpinningRoulette(false);
+        setIsRouletteSettling(false);
         triggerToast(error.message || '동률 추첨에 실패했습니다.', 'error');
         return;
       }
@@ -4033,7 +4291,17 @@ export default function App() {
     const normalizedStopAngle = (360 - svgPointerStopAngle + 360) % 360;
 
     // Calculate next cumulative rotation (minimum 5 full extra spins = 1800 deg)
-    const currentRot = rouletteRotation;
+    let currentRot = rouletteRotation;
+    if (wheelElement) {
+      const computedTransform = window.getComputedStyle(wheelElement).transform;
+      if (computedTransform && computedTransform !== 'none') {
+        const matrix = new DOMMatrixReadOnly(computedTransform);
+        currentRot = (Math.atan2(matrix.b, matrix.a) * 180 / Math.PI + 360) % 360;
+      }
+    }
+    rouletteWheelAnimationRef.current?.cancel();
+    rouletteWheelAnimationRef.current = null;
+
     const currentMod = currentRot % 360;
     const additionalFullSpins = 360 * 5;
 
@@ -4042,20 +4310,64 @@ export default function App() {
 
     const newTargetRotation = currentRot + additionalFullSpins + deltaAngle;
 
+    setRouletteRotation(currentRot);
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    setIsRouletteSettling(true);
     setRouletteRotation(newTargetRotation);
 
-    setTimeout(async () => {
-      setIsSpinningRoulette(false);
-      setRouletteWinnerResult(chosenIdea.title);
-      triggerToast(
-        roulettePurpose === 'TIE_RESOLUTION'
-          ? `동률 추첨 결과 [${chosenIdea.title}]이(가) 최종 확정되었습니다.`
-          : `🎲 룰렛 미리보기 결과: [${chosenIdea.title}]`
-      );
-      if (roulettePurpose === 'TIE_RESOLUTION' && activeRoomId) {
-        await fetchRoomDetails(activeRoomId);
-      }
-    }, 3600);
+    // The server may already be finalized, but the reveal remains blocked until
+    // the user has seen a complete deceleration and confirms the modal result.
+    await new Promise(resolve => window.setTimeout(resolve, 3600));
+    if (roomRefreshPromise) await roomRefreshPromise;
+    setIsRouletteSettling(false);
+    setIsSpinningRoulette(false);
+    setRouletteWinnerResult(chosenIdea.title);
+    triggerToast(
+      roulettePurpose === 'TIE_RESOLUTION'
+        ? `동률 추첨 결과 [${chosenIdea.title}]이(가) 최종 확정되었습니다.`
+        : `🎲 룰렛 미리보기 결과: [${chosenIdea.title}]`
+    );
+  };
+
+  const isFinalTieRouletteResultReady = roulettePurpose === 'TIE_RESOLUTION' &&
+    Boolean(rouletteWinnerResult) &&
+    (isTieRouletteServerComplete || roomDetails?.finalVoteCycle?.status === 'COMPLETED');
+
+  const handleCloseRouletteModal = () => {
+    if (isSpinningRoulette) return;
+    if (roulettePurpose === 'TIE_RESOLUTION' && rouletteWinnerResult) return;
+    rouletteWheelAnimationRef.current?.cancel();
+    rouletteWheelAnimationRef.current = null;
+    setRouletteDisplayCandidates([]);
+    setShowRouletteModal(false);
+  };
+
+  const handleConfirmCompletedTieRoulette = () => {
+    if (!isFinalTieRouletteResultReady) return;
+    rouletteWheelAnimationRef.current?.cancel();
+    rouletteWheelAnimationRef.current = null;
+    setShowRouletteModal(false);
+    setRouletteDisplayCandidates([]);
+    rouletteRevealBlockedRef.current = false;
+
+    const roomId = roomDetails?.room.id;
+    const hasFinalWinner = (roomDetails?.ideas || []).some(idea => idea.status === 'WINNER');
+    const shouldRevealWinner = winnerAnnouncementPendingRef.current || (
+      roomDetails?.room.finalVoteStatus !== 'TIE_PENDING' && hasFinalWinner
+    );
+    winnerAnnouncementPendingRef.current = false;
+    if (roomId && shouldRevealWinner) {
+      hasShownWinnerModalRef.current.add(roomId);
+      setShowWinnerModal(true);
+    }
+  };
+
+  const handleRoulettePrimaryAction = () => {
+    if (isFinalTieRouletteResultReady) {
+      handleConfirmCompletedTieRoulette();
+      return;
+    }
+    void handleSpinRoulette();
   };
 
 
@@ -4395,9 +4707,9 @@ export default function App() {
                   {roomDetails.room.status === 'CRITERIA_PROPOSAL' && '2단계: 기준 익명제안 중'}
                   {roomDetails.room.status === 'CRITERIA_REVIEW' && '2단계: 평가 기준 확정 중'}
                   {roomDetails.room.status === 'EVALUATION' && '3단계: 1차 종합점수 및 익명 피드백 중'}
-                  {roomDetails.room.status === 'EVALUATION_ROUND_2' && '4단계: 2차 종합점수 평가 중'}
-                  {roomDetails.room.status === 'ELIMINATION' && ((roomDetails.room.engineVersion || 1) >= 7 ? '5단계: 최종 별 투표 중' : (roomDetails.room.finalVoteStatus === 'NOT_STARTED' ? '3단계: 1차 평가 결과' : '4단계: 2차 익명 투표 중'))}
-                  {roomDetails.room.status === 'CLOSED' && '완료 (최종 선정)'}
+                  {roomDetails.room.status === 'EVALUATION_ROUND_2' && '추가 후보 압축: 2차 점수평가 중'}
+                  {(roomDetails.room.status === 'ELIMINATION' || roomDetails.room.status === 'FINAL_VOTE') && ((roomDetails.room.engineVersion || 1) >= 7 ? '4단계: 최종 별 투표 중' : (roomDetails.room.finalVoteStatus === 'NOT_STARTED' ? '3단계: 1차 평가 결과' : '4단계: 2차 익명 투표 중'))}
+                  {roomDetails.room.status === 'CLOSED' && ((roomDetails.room.engineVersion || 1) >= 7 ? '5단계: 최종 결과' : '완료 (최종 선정)')}
                 </span>
               </div>
             )}
@@ -5483,14 +5795,14 @@ export default function App() {
                           ]
                         : isV7Room
                           ? [
-                              { key: 'IDEA_SUBMISSION', label: '1단계 : 아이디어' },
-                              { key: 'CRITERIA_PROPOSAL', label: '2단계 : 평가 기준 설정' },
-                              { key: 'EVALUATION', label: '3단계 : 1차 점수·피드백' },
+                              { key: 'IDEA_SUBMISSION', label: '1단계 : 아이디어', badge: '1' },
+                              { key: 'CRITERIA_PROPOSAL', label: '2단계 : 평가 기준 설정', badge: '2' },
+                              { key: 'EVALUATION', label: '3단계 : 1차 점수·피드백', badge: '3' },
                               ...(hasV7SecondScoreRound
-                                ? [{ key: 'EVALUATION_ROUND_2', label: '4단계 : 2차 종합점수' }]
+                                ? [{ key: 'EVALUATION_ROUND_2', label: '추가 후보 압축 : 2차 점수평가', badge: '+' }]
                                 : []),
-                              { key: 'ELIMINATION', label: `${hasV7SecondScoreRound ? '5' : '4'}단계 : 최종 별 투표` },
-                              { key: 'CLOSED', label: `${hasV7SecondScoreRound ? '6' : '5'}단계 : 최종 결과` }
+                              { key: 'ELIMINATION', label: '4단계 : 최종 별 투표', badge: '4' },
+                              { key: 'CLOSED', label: '5단계 : 최종 결과', badge: '5' }
                             ]
                           : [
                               { key: 'IDEA_SUBMISSION', label: '1단계 : 아이디어' },
@@ -5527,7 +5839,7 @@ export default function App() {
                                 ? 'bg-indigo-50 border-indigo-200 text-indigo-600 font-bold'
                                 : 'border-slate-100 text-slate-300 bg-slate-50'
                               }`}>
-                              {isCompleted ? <Check className="w-3.5 h-3.5" /> : idx + 1}
+                              {isCompleted ? <Check className="w-3.5 h-3.5" /> : ('badge' in step ? step.badge : idx + 1)}
                             </div>
                             <span className={`text-sm font-medium transition ${isActive ? 'text-indigo-600 font-bold' : isCompleted ? 'text-slate-700' : 'text-slate-400'
                               }`}>
@@ -5578,9 +5890,9 @@ export default function App() {
                                 {roomDetails.room?.status === 'IDEA_SUBMISSION' && '1단계 : 아이디어'}
                                 {(roomDetails.room?.status === 'CRITERIA_PROPOSAL' || roomDetails.room?.status === 'CRITERIA_REVIEW') && '2단계 : 평가 기준 설정'}
                                 {roomDetails.room?.status === 'EVALUATION' && '3단계 : 1차 종합점수 및 익명 피드백'}
-                                {roomDetails.room?.status === 'EVALUATION_ROUND_2' && '4단계 : 2차 종합점수 평가'}
-                                {(roomDetails.room?.status === 'ELIMINATION' || roomDetails.room?.status === 'FINAL_VOTE') && `${hasV7SecondScoreRound ? '5' : '4'}단계 : 최종 별 투표`}
-                                {roomDetails.room?.status === 'CLOSED' && `${hasV7SecondScoreRound ? '6' : '5'}단계 : 최종 결과`}
+                                {roomDetails.room?.status === 'EVALUATION_ROUND_2' && '추가 후보 압축 : 2차 점수평가'}
+                                {(roomDetails.room?.status === 'ELIMINATION' || roomDetails.room?.status === 'FINAL_VOTE') && '4단계 : 최종 별 투표'}
+                                {roomDetails.room?.status === 'CLOSED' && '5단계 : 최종 결과'}
                               </>
                             ) : (
                               <>
@@ -6738,7 +7050,7 @@ export default function App() {
                             <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
                               <div className="space-y-2">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <span className="text-[10px] font-black tracking-widest uppercase text-amber-300">4단계 · 2차 점수 평가</span>
+                                  <span className="text-[10px] font-black tracking-widest uppercase text-amber-300">추가 후보 압축 · 2차 점수평가</span>
                                   <span className="text-[10px] font-black px-2.5 py-1 rounded-full bg-white/10 border border-white/15 text-indigo-100">경계 동점 결선</span>
                                 </div>
                                 <h2 className="text-xl font-black">최종 후보 남은 자리를 추가 결선으로 결정합니다</h2>
@@ -6864,7 +7176,7 @@ export default function App() {
                               <div className="space-y-2">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <span className={`text-[10px] font-black tracking-widest uppercase ${isSecondScoreRound ? 'text-amber-300' : 'text-indigo-600'}`}>
-                                    {isSecondScoreRound ? '4단계 · 2차 점수 평가' : '3단계 · 1차 익명 평가'}
+                                    {isSecondScoreRound ? '추가 후보 압축 · 2차 점수평가' : '3단계 · 1차 익명 평가'}
                                   </span>
                                   <span className={`text-[10px] font-black px-2.5 py-1 rounded-full border ${isSecondScoreRound
                                     ? 'bg-white/10 border-white/15 text-indigo-100'
@@ -7870,14 +8182,14 @@ export default function App() {
                               <div>
                                 <span className="text-[10px] font-black text-amber-300">최종 경계 동률</span>
                                 <h3 className="text-base font-extrabold mt-1">롤렛 진행 동의</h3>
-                                <p className="text-xs text-slate-300 mt-1 leading-relaxed">전원이 동의하면 방장이 남은 자리 수만큼 롤렛을 돌립니다. 한 명이라도 거절하면 동률 후보만 별 3개 재투표를 시작합니다.</p>
+                                <p className="text-xs text-slate-300 mt-1 leading-relaxed">룰렛은 참여자 전원의 동의가 필요합니다. 한 명이라도 별 재투표를 선택하면, 별도의 추가 동의 없이 동률 후보만 대상으로 전원 별 3개 재투표가 즉시 시작됩니다.</p>
                               </div>
                               {typeof cycle.myRouletteConsent === 'boolean' ? (
                                 <p className="bg-white/10 rounded-xl p-3 text-xs font-bold">내 선택: {cycle.myRouletteConsent ? '롤렛 동의' : '별 재투표'}</p>
                               ) : (
                                 <div className="grid grid-cols-2 gap-2">
-                                  <button type="button" onClick={() => handleRouletteConsent(true)} className="py-3 bg-amber-400 text-slate-950 rounded-xl text-xs font-black">롤렛 동의</button>
-                                  <button type="button" onClick={() => handleRouletteConsent(false)} className="py-3 bg-white text-slate-900 rounded-xl text-xs font-black">별 재투표</button>
+                                  <button type="button" onClick={() => handleRouletteConsent(true)} className="py-3 bg-amber-400 text-slate-950 rounded-xl text-xs font-black">룰렛 동의</button>
+                                  <button type="button" onClick={() => handleRouletteConsent(false)} className="py-3 bg-white text-slate-900 rounded-xl text-xs font-black">별 재투표 선택</button>
                                 </div>
                               )}
                               <p className="text-[10px] text-slate-400">동의 {cycle.consentedCount}명 · 재투표 선택 {cycle.declinedCount}명</p>
@@ -7886,17 +8198,34 @@ export default function App() {
                             <div className="bg-indigo-950 text-white p-5 rounded-2xl shadow-md space-y-4">
                               <div>
                                 <span className="text-[10px] font-black text-amber-300">전원 동의 완료</span>
-                                <h3 className="text-base font-extrabold mt-1">동률 롤렛 {cycle.nextRouletteDrawNumber}/{cycle.tieSlots}</h3>
-                                <p className="text-xs text-indigo-200 mt-1">이미 나온 후보는 다음 롤렛에서 자동 제외됩니다.</p>
+                                <h3 className="text-base font-extrabold mt-1">
+                                  {remainingTieRouletteDraws > 0
+                                    ? `동률 룰렛 ${cycle.nextRouletteDrawNumber}/${cycle.tieSlots}`
+                                    : '동률 룰렛 완료'}
+                                </h3>
+                                <p className="text-xs text-indigo-200 mt-1">
+                                  {cycle.tieSlots === 1
+                                    ? '동률 후보 중 최종 선정할 1개를 룰렛으로 결정합니다.'
+                                    : remainingTieRouletteDraws > 0
+                                      ? `동률 후보 중 최종 선정할 ${cycle.tieSlots}개를 순서대로 룰렛으로 결정합니다.`
+                                      : '필요한 룰렛 추첨이 모두 완료되었습니다.'}
+                                </p>
+                                {completedTieRouletteDraws > 0 && remainingTieRouletteDraws > 0 && (
+                                  <p className="text-[11px] text-indigo-300 mt-1">이미 나온 후보는 다음 룰렛에서 자동 제외됩니다.</p>
+                                )}
                               </div>
                               {cycle.rouletteDraws.length > 0 && (
                                 <ul className="space-y-1 text-xs text-indigo-100">
                                   {cycle.rouletteDraws.map(draw => <li key={draw.drawNumber}>#{draw.drawNumber} {ideaById.get(draw.selectedIdeaId)?.title || draw.selectedIdeaId}</li>)}
                                 </ul>
                               )}
-                              {roomDetails.room.hostId === userId
-                                ? <button type="button" onClick={() => { setRoulettePurpose('TIE_RESOLUTION'); setRouletteWinnerResult(null); setShowRouletteModal(true); }} className="w-full py-3 bg-amber-400 text-slate-950 rounded-xl text-xs font-black">다음 롤렛 돌리기</button>
-                                : <p className="text-xs font-bold text-amber-200">방장이 다음 롤렛을 진행하고 있습니다.</p>}
+                              {remainingTieRouletteDraws > 0 ? (
+                                roomDetails.room.hostId === userId
+                                  ? <button type="button" onClick={() => { setRoulettePurpose('TIE_RESOLUTION'); setRouletteWinnerResult(null); setShowRouletteModal(true); }} className="w-full py-3 bg-amber-400 text-slate-950 rounded-xl text-xs font-black">{tieRouletteActionLabel}</button>
+                                  : <p className="text-xs font-bold text-amber-200">방장이 {tieRouletteActionLabel}를 진행하고 있습니다.</p>
+                              ) : (
+                                <p className="w-full py-3 bg-white/10 text-emerald-200 rounded-xl text-xs font-black text-center">룰렛 완료</p>
+                              )}
                             </div>
                           ) : null}
                         </aside>
@@ -8606,7 +8935,15 @@ export default function App() {
                                 className="px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl text-xs font-black flex items-center gap-2 border border-amber-500"
                               >
                                 <Download className="w-4 h-4" />
-                                의사결정 회의록 PDF 저장
+                                PDF로 저장
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleDownloadMarkdown}
+                                className="px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl text-xs font-black flex items-center gap-2 border border-amber-500"
+                              >
+                                <FileText className="w-4 h-4" />
+                                Markdown으로 저장
                               </button>
                             </div>
                           </div>
@@ -8667,11 +9004,13 @@ export default function App() {
                                   <th>실행 내용</th>
                                   <td>{meetingMinutes.winners.map(winner => `${winner.title}: ${winner.description}`).join(' / ')}</td>
                                 </tr>
-                                <tr>
-                                  <th>선정 방식</th>
-                                  <td>{meetingMinutes.winners.some(winner => winner.winnerSelectionMethod === 'ROULETTE') ? '동률 룰렛 선정' : meetingMinutes.winners.every(winner => winner.winnerSelectionMethod === 'AUTO_ALL') ? '후보 수 충족에 따른 자동 선정' : '참여자별 별 3개를 사용하는 익명 누적 투표'}</td>
-                                </tr>
-                                <tr><th>투표 결과</th><td>{meetingMinutes.candidateVoteSummary || '최종 투표 생략'}</td></tr>
+                                <tr><th>최종 투표 결과</th><td>{meetingMinutes.finalVoteResultSummary}</td></tr>
+                                {meetingMinutes.tieResolutionSummary && (
+                                  <tr><th>동률 처리</th><td>{meetingMinutes.tieResolutionSummary}</td></tr>
+                                )}
+                                {meetingMinutes.rouletteResultSummary && (
+                                  <tr><th>룰렛 결과</th><td>{meetingMinutes.rouletteResultSummary}</td></tr>
+                                )}
                                 <tr><th>최종 결론</th><td>{meetingMinutes.winnerNames}을(를) 최종 실행안으로 선정합니다.</td></tr>
                               </tbody>
                             </table>
@@ -9079,13 +9418,15 @@ export default function App() {
             >
               <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-amber-400 via-indigo-600 to-amber-500" />
 
-              <button
-                type="button"
-                onClick={() => setShowRouletteModal(false)}
-                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition p-1 rounded-lg"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              {!isSpinningRoulette && !(roulettePurpose === 'TIE_RESOLUTION' && rouletteWinnerResult) && (
+                <button
+                  type="button"
+                  onClick={handleCloseRouletteModal}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition p-1 rounded-lg"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
 
               <div className="space-y-1">
                 <div className="inline-flex items-center gap-1 bg-amber-100 border border-amber-300 text-amber-900 text-[11px] font-black px-3 py-0.5 rounded-full mb-1">
@@ -9103,7 +9444,11 @@ export default function App() {
                     : 'text-rose-600 bg-rose-50 border-rose-100'
                 }`}>
                   {roulettePurpose === 'TIE_RESOLUTION'
-                    ? '서버가 동률 후보 안에서 암호학적 난수로 한 자리씩 추첨하고 즉시 저장합니다. 이미 선정된 후보는 다음 추첨에서 제외됩니다.'
+                    ? requiredTieRouletteDraws === 1
+                      ? '동률 후보 중 최종 선정할 1개를 룰렛으로 결정합니다.'
+                      : completedTieRouletteDraws > 0 && remainingTieRouletteDraws > 0
+                        ? '서버가 동률 후보 중 다음 한 자리를 추첨해 즉시 저장합니다. 이미 선정된 후보는 다음 룰렛에서 자동 제외됩니다.'
+                        : '서버가 동률 후보 안에서 암호학적 난수로 한 자리씩 추첨하고 즉시 저장합니다.'
                     : '⚠️ 이 결과는 실제 최종 선정 결과에 반영되지 않는 미리보기 테스트입니다.'}
                 </p>
               </div>
@@ -9115,15 +9460,20 @@ export default function App() {
 
                 {/* Spinning Wheel Disk */}
                 <div
+                  ref={rouletteWheelRef}
                   className="w-full h-full rounded-full border-4 border-slate-900 shadow-xl overflow-hidden relative transition-transform ease-out"
                   style={{
                     transform: `rotate(${rouletteRotation}deg)`,
-                    transitionDuration: isSpinningRoulette ? '3.5s' : '0s'
+                    transitionDuration: isRouletteSettling ? '3.5s' : '0s',
+                    transitionTimingFunction: 'cubic-bezier(0.12, 0.72, 0.2, 1)'
                   }}
                 >
                   <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
                     {(() => {
-                      const total = rouletteCandidateIdeas.length;
+                      const displayedCandidates = rouletteDisplayCandidates.length > 0
+                        ? rouletteDisplayCandidates
+                        : rouletteCandidateIdeas;
+                      const total = displayedCandidates.length;
                       const sliceAngle = 360 / total;
                       const colorPalette = [
                         '#4f46e5', // indigo-600
@@ -9134,7 +9484,7 @@ export default function App() {
                         '#0284c7'  // sky-600
                       ];
 
-                      return rouletteCandidateIdeas.map((candidate, idx) => {
+                      return displayedCandidates.map((candidate, idx) => {
                         const startAngle = idx * sliceAngle;
                         const endAngle = (idx + 1) * sliceAngle;
                         const midAngle = startAngle + sliceAngle / 2;
@@ -9205,21 +9555,20 @@ export default function App() {
               )}
 
               <div className="flex gap-2 pt-2">
+                {!(roulettePurpose === 'TIE_RESOLUTION' && rouletteWinnerResult) && (
+                  <button
+                    type="button"
+                    onClick={handleCloseRouletteModal}
+                    disabled={isSpinningRoulette}
+                    className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition disabled:opacity-50"
+                  >
+                    닫기
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => setShowRouletteModal(false)}
-                  className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition"
-                >
-                  닫기
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSpinRoulette}
-                  disabled={isSpinningRoulette || (
-                    roulettePurpose === 'TIE_RESOLUTION' &&
-                    Boolean(rouletteWinnerResult) &&
-                    !((roomDetails?.room.engineVersion || 1) >= 7 && roomDetails?.finalVoteCycle?.status === 'ROULETTE')
-                  )}
+                  onClick={handleRoulettePrimaryAction}
+                  disabled={isSpinningRoulette}
                   className="flex-1 py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 border border-amber-500 rounded-xl text-xs font-black transition shadow-md flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
                 >
                   {isSpinningRoulette ? (
@@ -9232,13 +9581,11 @@ export default function App() {
                       <Sparkles className="w-3.5 h-3.5 text-slate-950" />
                       <span>
                         {roulettePurpose === 'TIE_RESOLUTION' && rouletteWinnerResult
-                          ? ((roomDetails?.room.engineVersion || 1) >= 7 && roomDetails?.finalVoteCycle?.status === 'ROULETTE'
-                            ? '다음 자리 추첨하기'
-                            : '최종 확정 완료')
+                          ? (isFinalTieRouletteResultReady ? '최종 확정 완료' : '다음 룰렛 돌리기')
                           : rouletteWinnerResult
                             ? '다시 돌리기'
                             : roulettePurpose === 'TIE_RESOLUTION'
-                              ? '동률 결과 확정하기'
+                              ? tieRouletteActionLabel
                               : '룰렛 돌리기'}
                       </span>
                     </>
@@ -9476,6 +9823,7 @@ export default function App() {
       {/* Winner Announcement Popup Modal ("최종 아이디어가 선정되었습니다") */}
       <AnimatePresence>
         {showWinnerModal &&
+          !rouletteRevealBlockedRef.current &&
           roomDetails?.room.finalVoteStatus !== 'TIE_PENDING' &&
           (roomDetails?.ideas || []).some(idea => idea.status === 'WINNER') && (
           <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
