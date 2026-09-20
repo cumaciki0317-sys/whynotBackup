@@ -2056,7 +2056,7 @@ export default function App() {
   const getIdeaSaveProgressLabel = (mode: 'CREATE' | 'UPDATE', ideaId?: string) => {
     const progress = ideaSaveProgress;
     if (!progress || progress.mode !== mode || (mode === 'UPDATE' && progress.ideaId !== ideaId)) {
-      return mode === 'CREATE' ? '아이디어 올리기 (익명)' : '저장';
+      return mode === 'CREATE' ? '아이디어 등록하기' : '저장';
     }
     if (progress.phase === 'SAVING') return '아이디어 저장 중…';
     if (progress.phase === 'UPLOADING') {
@@ -6130,7 +6130,7 @@ export default function App() {
                       <div className="flex sm:flex-col items-end gap-2 justify-between">
                         {/* Live progress indicator ("N/M명 아이디어 제출 완료") */}
                         <div className="text-xs font-bold text-slate-700 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-full shrink-0 flex items-center gap-1.5">
-                          <span>📊 등록 완료 현황판:</span>
+                          <span>제출 완료:</span>
                           <span className="text-indigo-600 font-extrabold">
                             {roomDetails.completedParticipantsCount || 0} / {Math.max(1, Number((roomDetails as any).participantCount || 1))}명 완료
                           </span>
@@ -6180,21 +6180,29 @@ export default function App() {
                               <div className="space-y-2">
                                 <h3 className="text-lg font-bold text-slate-900">
                                   {isIdeaGateMinMet
-                                    ? '팀 내 최소 응답 수 및 아이디어 등록 충족 완료!'
+                                    ? roomDetails.room.hostId === userId
+                                      ? '모든 참여자가 아이디어 제출을 완료했어요.'
+                                      : '아이디어 제출을 완료했어요.'
                                     : targetTotalCount < 2
                                       ? '참여자 2명 이상이 필요합니다'
                                       : participantQuorumMet && !ideasCountMet
                                         ? '선택지(아이디어) 추가 등록이 필요합니다'
-                                        : '다른 구성원들의 참가를 기다리는 중'}
+                                        : '아이디어 제출을 완료했어요.'}
                                 </h3>
                                 <p className="text-xs text-slate-500 leading-relaxed max-w-md mx-auto">
                                   {isIdeaGateMinMet
                                     ? roomDetails.room.hostId === userId
-                                      ? '팀 내 최소 응답 수와 아이디어 등록 조건을 모두 충족했습니다. 방장은 아래 버튼을 눌러 2단계로 진행할 수 있습니다.'
-                                      : '팀 내 최소 응답 수와 아이디어 등록 조건을 모두 충족했습니다. 방장이 다음 단계로 이동하면 모든 참여자가 함께 2단계로 이동합니다.'
+                                      ? roomDetails.room.decisionMode === 'QUICK'
+                                        ? '이제 익명 투표로 진행할 수 있습니다.'
+                                        : '이제 평가 기준 설정으로 진행할 수 있습니다.'
+                                      : roomDetails.room.decisionMode === 'QUICK'
+                                        ? '방장이 익명 투표를 시작하면 자동으로 이동합니다.'
+                                        : '방장이 평가 기준 설정을 시작하면 자동으로 이동합니다.'
                                     : targetTotalCount < 2
                                       ? '한 명이 탈퇴했거나 아직 참여자가 부족합니다. 새 참여자가 합류한 뒤 남은 참여자 전원이 완료하면 방장이 다음 단계로 진행할 수 있습니다.'
-                                      : '등록 내용을 동시에 공개하기 위해 현재 참여자 전원이 완료를 눌러야 다음 단계로 진행할 수 있습니다.'}
+                                      : participantQuorumMet && !ideasCountMet
+                                        ? '필요한 아이디어 수를 충족한 뒤 다시 제출을 완료해주세요.'
+                                        : `다른 참여자의 제출을 기다리고 있습니다. 모든 참여자가 완료하면 다음 단계인 ${roomDetails.room.decisionMode === 'QUICK' ? '익명 투표' : '평가 기준 설정'}으로 진행합니다.`}
                                 </p>
                                 {participantQuorumMet && !ideasCountMet && (
                                   <p className="text-xs font-bold text-amber-700 bg-amber-50 p-3 rounded-xl border border-amber-200 leading-relaxed max-w-md mx-auto mt-2">
@@ -6220,7 +6228,7 @@ export default function App() {
                                   onClick={handleExitIdeaGate}
                                   className="px-4.5 py-2.5 bg-white hover:bg-slate-50 text-slate-600 hover:text-slate-900 border border-slate-200 rounded-2xl text-xs font-bold transition cursor-pointer shadow-xs"
                                 >
-                                  이전 단계(아이디어 등록)로 되돌아가기
+                                  제출 완료 취소하고 수정
                                 </button>
 
                                 {isIdeaGateMinMet && roomDetails.room.hostId === userId && (
@@ -6241,7 +6249,7 @@ export default function App() {
                                         <span>
                                           {roomDetails.room.decisionMode === 'QUICK'
                                             ? '2단계: 익명 투표 시작하기'
-                                            : '2단계: 평가 기준 설정하러 가기'}
+                                            : '평가 기준 설정으로 이동'}
                                         </span>
                                         <ArrowRight className="w-4 h-4" />
                                       </>
@@ -6252,7 +6260,7 @@ export default function App() {
                                 {isIdeaGateMinMet && roomDetails.room.hostId !== userId && (
                                   <div className="px-5 py-2.5 bg-indigo-50 border border-indigo-200 text-indigo-900 rounded-2xl text-xs font-bold flex items-center gap-2">
                                     <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
-                                    <span>모든 조건을 충족했어요! 🎉 방장이 다음 단계로 이동하면 자동으로 함께 이동합니다.</span>
+                                    <span>모든 참여자가 제출을 완료했어요. 방장이 {roomDetails.room.decisionMode === 'QUICK' ? '익명 투표' : '평가 기준 설정'}을 시작하면 자동으로 이동합니다.</span>
                                   </div>
                                 )}
                               </div>
@@ -6386,7 +6394,7 @@ export default function App() {
                                             }}
                                             className="w-full text-xs text-slate-500 file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-white file:text-indigo-700 hover:file:bg-indigo-100"
                                           />
-                                          <p className="text-[10px] text-slate-500">PDF, PNG, JPG 파일을 첨부할 수 있습니다. 최대 10MB</p>
+                                          <p className="text-[10px] text-slate-500">PDF, PNG, JPG · 파일당 최대 10MiB · 최대 3개</p>
                                         </div>
                                         {editIdeaReferenceFiles.map((file, index) => (
                                           <div key={`${file.name}-${file.lastModified}-${index}`} className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2 flex items-center justify-between gap-2">
@@ -6394,7 +6402,7 @@ export default function App() {
                                             <button type="button" onClick={() => setEditIdeaReferenceFiles(current => current.filter((_, itemIndex) => itemIndex !== index))} className="text-[11px] font-black text-rose-600">선택 삭제</button>
                                           </div>
                                         ))}
-                                        <p className="text-[10px] text-amber-700 leading-relaxed">익명 제출을 위해 파일 본문의 이름·이메일·연락처 등 식별 정보를 확인해 주세요.</p>
+                                        <p className="text-[10px] text-slate-600 leading-relaxed">🔒 파일에 이름·이메일 등 작성자를 식별할 수 있는 정보가 포함되지 않았는지 확인해주세요.</p>
                                       </div>
                                     </div>
 
@@ -6542,7 +6550,7 @@ export default function App() {
                         <div className="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                           <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                             <h2 className="text-base font-bold text-slate-900">
-                              내 {getCategoryCopy(roomDetails.room.category).proposal} 등록하기 (익명)
+                              내 {getCategoryCopy(roomDetails.room.category).proposal} 등록
                             </h2>
                             <span className="text-[11px] font-bold text-slate-500">
                               (내 제출: {(roomDetails.ideas || []).filter(i => i.submitterId === userId).length}/3개)
@@ -6572,9 +6580,6 @@ export default function App() {
                                 rows={4}
                                 className="w-full px-4 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
                               />
-                              <p className="text-[11px] text-slate-500 leading-relaxed">
-                                AI가 더 적합한 평가 기준을 제안할 수 있도록 핵심 내용·대상·실행 방식을 구체적으로 작성해 주세요. 최소 글자 수는 강제하지 않습니다.
-                              </p>
                               </div>
 
                             <div className="space-y-1">
@@ -6620,7 +6625,7 @@ export default function App() {
                                   }}
                                   className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-white file:text-indigo-700 hover:file:bg-indigo-100"
                                 />
-                                <p className="text-[10px] text-slate-500">PDF, PNG, JPG 파일을 첨부할 수 있습니다. 최대 10MB</p>
+                                <p className="text-[10px] text-slate-500">PDF, PNG, JPG · 파일당 최대 10MiB · 최대 3개</p>
                               </div>
                               {ideaReferenceFiles.map((file, index) => (
                                 <div key={`${file.name}-${file.lastModified}-${index}`} className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2 flex items-center justify-between gap-3">
@@ -6628,30 +6633,34 @@ export default function App() {
                                   <button type="button" onClick={() => setIdeaReferenceFiles(current => current.filter((_, itemIndex) => itemIndex !== index))} className="text-[11px] font-black text-rose-600 shrink-0">선택 삭제</button>
                                 </div>
                               ))}
-                              <p className="text-[10px] text-amber-700 leading-relaxed bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-2">익명 제출 안내: 파일 본문에 이름, 이메일, 연락처 등 작성자를 식별할 수 있는 정보가 포함되어 있지 않은지 확인해 주세요.</p>
+                              <p className="text-[11px] text-slate-600 leading-relaxed">🔒 파일에 이름·이메일 등 작성자를 식별할 수 있는 정보가 포함되지 않았는지 확인해주세요.</p>
                             </div>
 
-                            <div className="bg-indigo-50/60 p-3 rounded-xl border border-indigo-100 text-xs text-indigo-900 leading-relaxed">
-                              🔒 **익명 정책**: 제출자 이름 대신 **'익명 아이디어 #N'**으로 등록되며 타인에게 닉네임이 노출되지 않습니다. (1인당 최소 1개~최대 3개)
-                            </div>
+                            <details className="text-xs text-slate-600">
+                              <summary className="cursor-pointer font-bold text-indigo-700">익명 제출 안내 보기</summary>
+                              <p className="mt-2 leading-relaxed rounded-lg bg-slate-50 px-3 py-2">
+                                제출자의 닉네임은 다른 참여자에게 공개되지 않으며, 제출한 내용은 '익명 아이디어 #N'으로 표시됩니다. 참여자마다 최소 1개, 최대 3개까지 등록할 수 있습니다.
+                              </p>
+                            </details>
 
                             <button
                               type="submit"
                               disabled={isIdeaSubmitBusy || (roomDetails.ideas || []).filter(i => i.submitterId === userId).length >= 3}
                               className="w-full py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition shadow-sm"
                             >
-                              {isIdeaSubmitBusy ? getIdeaSaveProgressLabel('CREATE') : '아이디어 올리기 (익명)'}
+                              {isIdeaSubmitBusy ? getIdeaSaveProgressLabel('CREATE') : `${getCategoryCopy(roomDetails.room.category).proposal} 등록하기`}
                             </button>
 
                             {(roomDetails.ideas || []).length >= 1 && (
-                              <div className="pt-2 border-t border-slate-100 mt-2">
+                              <div className="pt-3 border-t border-slate-100 mt-2 space-y-2">
+                                <p className="text-xs text-slate-600 text-center">더 추가할 {getCategoryCopy(roomDetails.room.category).proposal}이(가) 없다면 제출을 완료해주세요.</p>
                                 <button
                                   type="button"
                                   onClick={handleEnterIdeaGate}
                                   className="w-full py-2.5 bg-amber-400 text-slate-950 hover:bg-amber-300 rounded-xl text-xs font-black transition shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
                                 >
                                   <Sparkles className="w-4 h-4 text-slate-950" />
-                                  <span>아이디어 등록 완료 & 제출 목록/게이트 보기</span>
+                                  <span>{getCategoryCopy(roomDetails.room.category).proposal} 제출 완료하기</span>
                                   <ArrowRight className="w-4 h-4" />
                                 </button>
                               </div>
