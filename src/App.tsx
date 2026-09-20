@@ -6754,13 +6754,16 @@ export default function App() {
 
                       {/* Left: Input Proposal Form & AI Suggested Criteria */}
                       <div className="lg:col-span-7 space-y-6">
+                        <p className="text-xs font-semibold text-slate-600">
+                          AI 추천 또는 직접 작성 중 원하는 방식을 선택할 수 있습니다. 둘 중 하나 이상 제안하면 완료되며, 각 방식별로 최대 3개까지 제안할 수 있습니다.
+                        </p>
 
                         {/* AI Criteria Generator Card (Potens AI) */}
                         <div className="bg-gradient-to-br from-indigo-900 via-slate-900 to-slate-900 text-white p-5 md:p-6 rounded-2xl shadow-md space-y-4">
                           <div className="flex items-center justify-between">
                             <h3 className="text-sm font-bold flex items-center gap-2 text-amber-400">
                               <Sparkles className="w-4 h-4 text-amber-400" />
-                              AI 기반 평가 기준 3가지 제안
+                              AI 평가 기준 추천 (선택)
                             </h3>
                             <button
                               type="button"
@@ -6776,13 +6779,13 @@ export default function App() {
                               ) : (
                                 <>
                                   <Sparkles className="w-3 h-3" />
-                                  AI 기준 생성
+                                  AI 추천 받아보기
                                 </>
                               )}
                             </button>
                           </div>
                           <p className="text-xs text-slate-300 leading-relaxed">
-                            등록된 아이디어들의 특성을 분석하여 적합한 평가 기준 3가지를 AI가 추천합니다. 마음에 드는 기준을 선택하여 제안 목록에 추가할 수 있습니다.
+                            필요하면 AI 추천을 받아보세요. 직접 기준만 작성해도 다음 단계로 진행할 수 있습니다.
                           </p>
 
                           {aiSuggestedCriteria.length > 0 && (
@@ -6840,7 +6843,7 @@ export default function App() {
                         <div className="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                           <div className="border-b border-slate-100 pb-2 flex items-center justify-between">
                             <div>
-                              <h2 className="text-base font-bold text-slate-900">직접 기준 작성 및 제안</h2>
+                              <h2 className="text-base font-bold text-slate-900">직접 기준 작성 및 제안 (선택)</h2>
                               <p className="text-xs text-slate-500 mt-0.5">
                                 "이 아이디어들을 평가할 때 어떤 점을 중요하게 봐야 하는가?" 의견을 입력해 주세요.
                               </p>
@@ -6864,7 +6867,7 @@ export default function App() {
 
                           <form onSubmit={handleProposeCriterion} className="space-y-4">
                             <div className="space-y-1">
-                              <label className="text-xs font-bold text-slate-700">제안할 기준 내용 <span className="text-rose-500">*</span></label>
+                              <label className="text-xs font-bold text-slate-700">제안할 기준 내용</label>
                               <textarea
                                 required={myProposalsCount === 0}
                                 disabled={totalProposalsCount >= 21}
