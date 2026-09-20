@@ -23,7 +23,8 @@ import {
   DecisionRound,
   DecisionReport,
   ParticipantRole,
-  VoterSetupState
+  VoterSetupState,
+  ReportSafeSummary
 } from './src/types';
 
 dotenv.config();
@@ -3647,6 +3648,7 @@ ${reasons.map(r => `- ${r}`).join('\n')}
  */
 interface DecisionReportEvidence {
   roomTitle: string;
+  category: string;
   winnerIdeas: string[];
   winnerDescriptions: string[];
   selectedReasons: string[];
@@ -3659,6 +3661,26 @@ type SuggestedActionItem = NonNullable<DecisionReport['suggestedActionItems']>[n
 
 function buildDeterministicActionItems(evidence: DecisionReportEvidence): SuggestedActionItem[] {
   const winnerName = evidence.winnerIdeas[0] || '최종 선정안';
+  if (evidence.category === '디자인') {
+    return [
+      {
+        title: `${winnerName} 최종 시안 보완`,
+        completionCriteria: '회의에서 실제로 확인된 보완 포인트의 반영 범위와 우선순위를 검토합니다.'
+      },
+      {
+        title: '사용성 및 정보 전달 점검',
+        completionCriteria: '핵심 화면의 이해도와 주요 사용 흐름을 사용자 관점에서 확인합니다.'
+      },
+      {
+        title: '반응형·모바일 적용 확인',
+        completionCriteria: '필요한 화면 크기별 레이아웃과 콘텐츠 우선순위를 점검합니다.'
+      },
+      {
+        title: '디자인 시스템 및 개발 전달 사항 정리',
+        completionCriteria: '컴포넌트, 상태, 규격과 구현 시 확인할 사항을 제안 목록으로 정리합니다.'
+      }
+    ];
+  }
   return [
     {
       title: `${winnerName} 실행 범위와 핵심 타깃 정의`,
@@ -3708,6 +3730,7 @@ async function aiGenerateSuggestedActionItems(evidence: DecisionReportEvidence):
 
 # 회의
 - 주제: ${evidence.roomTitle}
+- 카테고리: ${evidence.category}
 - 최종 선정안: ${evidence.winnerIdeas.join(', ')}
 - 선정안 설명: ${evidence.winnerDescriptions.join(' / ') || '설명 없음'}
 
@@ -3718,6 +3741,7 @@ ${evidence.majorConcerns.map(item => `- ${item}`).join('\n') || '- 확인된 우
 ${[...evidence.unverifiedAssumptions, ...evidence.nextValidationTasks].map(item => `- ${item}`).join('\n') || '- 별도 입력 없음'}
 
 # 출력 규칙
+${evidence.category === '디자인' ? '- 디자인 회의이므로 최종 시안 보완, 사용성, 반응형, 디자인 시스템, 개발 전달 관점에서 실제 근거가 있는 제안만 작성하세요.\n' : ''}- 아래 과제는 모두 확정 지시가 아닌 제안입니다.
 설명이나 마크다운 없이 JSON 배열만 출력하세요.
 각 항목은 다음 두 문자열 필드만 사용하세요.
 [{"title":"구체적인 실행 과제","completionCriteria":"완료 여부를 확인할 수 있는 기준"}]
@@ -7422,6 +7446,9 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
     ? loadedVoterSetup
     : { ...loadedVoterSetup, registrations: undefined };
   const hasMyCriterionProposal = roomProposals.some(proposal => proposal.proposerId === userId);
+  const reportSafeSummary = room.status === 'CLOSED' && isExternalVoter
+    ? await buildReportSafeSummary(room, roomIdeas, roomCriteria, scoreProgress, v7FinalVoteState)
+    : undefined;
 
   const result: RoomDetails = {
     room,
@@ -7467,7 +7494,8 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
     myParticipantRole: currentMemberRole,
     participantCount,
     voterSetup,
-    hasMyCriterionProposal
+    hasMyCriterionProposal,
+    reportSafeSummary
   };
   (result as any).participantCount = participantCount;
   (result as any).hasCompletedIdeaSubmission = ideaCompletedSet.has(userId);
@@ -9499,6 +9527,100 @@ async function loadFinalVoteCycleState(room: Room, userId: string): Promise<{
   return { cycle, ballots, consents, draws, expectedCount: expectedVoters.size };
 }
 
+async function buildReportSafeSummary(
+  room: Room,
+  roomIdeas: Idea[],
+  roomCriteria: Criterion[],
+  scoreProgress: { expected: number; submitted: number },
+  currentFinalVoteState: Awaited<ReturnType<typeof loadFinalVoteCycleState>> | null
+): Promise<ReportSafeSummary> {
+  let initialCandidateIds: string[] = [];
+  let initialVoteTotals: Record<string, number> = {};
+
+  if (SUPABASE_CONFIGURED) {
+    const { data: initialCycle, error: cycleError } = await supabase
+      .from('final_vote_cycles')
+      .select('id,candidate_idea_ids')
+      .eq('room_id', room.id)
+      .eq('cycle_kind', 'INITIAL')
+      .order('cycle_number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (cycleError) throw new Error(`회의록용 최종 후보를 불러오지 못했습니다: ${cycleError.message}`);
+
+    initialCandidateIds = (initialCycle?.candidate_idea_ids || []).map(String);
+    if (initialCycle?.id) {
+      const { data: ballotRows, error: ballotError } = await supabase
+        .from('final_vote_ballots')
+        .select('selected_idea_ids')
+        .eq('cycle_id', initialCycle.id);
+      if (ballotError) throw new Error(`회의록용 최종 투표 집계를 불러오지 못했습니다: ${ballotError.message}`);
+      (ballotRows || []).forEach((row: any) => {
+        (row.selected_idea_ids || []).forEach((ideaId: unknown) => {
+          const key = String(ideaId);
+          initialVoteTotals[key] = (initialVoteTotals[key] || 0) + 1;
+        });
+      });
+    }
+  } else {
+    const cycle = currentFinalVoteState?.cycle;
+    initialCandidateIds = cycle?.candidateIdeaIds || [];
+    currentFinalVoteState?.ballots.forEach(selectedIds => {
+      selectedIds.forEach(ideaId => {
+        initialVoteTotals[ideaId] = (initialVoteTotals[ideaId] || 0) + 1;
+      });
+    });
+  }
+
+  if (initialCandidateIds.length === 0) {
+    initialCandidateIds = roomIdeas.filter(idea => idea.status === 'WINNER').map(idea => idea.id);
+  }
+
+  const currentCycle = currentFinalVoteState?.cycle;
+  const revoteTotals: Record<string, number> = {};
+  if (currentCycle?.cycleKind === 'TIE_REVOTE') {
+    currentFinalVoteState?.ballots.forEach(selectedIds => {
+      selectedIds.forEach(ideaId => {
+        revoteTotals[ideaId] = (revoteTotals[ideaId] || 0) + 1;
+      });
+    });
+  }
+
+  const ideasById = new Map(roomIdeas.map(idea => [idea.id, idea]));
+  const finalCandidates = initialCandidateIds.flatMap(ideaId => {
+    const idea = ideasById.get(ideaId);
+    if (!idea) return [];
+    return [{
+      id: idea.id,
+      title: idea.title,
+      description: idea.description,
+      finalStarTotal: initialVoteTotals[idea.id] || 0,
+      revoteStarTotal: Object.prototype.hasOwnProperty.call(revoteTotals, idea.id)
+        ? revoteTotals[idea.id]
+        : undefined,
+      selected: idea.status === 'WINNER'
+    }];
+  });
+  const finalizedCriteria = roomCriteria
+    .filter(criterion => criterion.confirmed)
+    .map(({ id, name, description }) => ({ id, name, description }));
+
+  return {
+    finalizedCriteria,
+    finalCandidates,
+    process: {
+      initialProposalCount: roomIdeas.length,
+      finalizedCriteriaCount: finalizedCriteria.length,
+      scoreEvaluationCompleted: scoreProgress.expected > 0 && scoreProgress.submitted >= scoreProgress.expected,
+      scoreEvaluationSubmittedCount: scoreProgress.submitted,
+      scoreEvaluationExpectedCount: scoreProgress.expected,
+      candidateCompressionCompleted: finalCandidates.length > 0 || room.status === 'CLOSED',
+      finalCandidateCount: finalCandidates.length
+    },
+    detailsRestricted: true
+  };
+}
+
 async function finalizeDecisionWinners(
   room: Room,
   roomIdeas: Idea[],
@@ -11482,6 +11604,7 @@ async function generateFinalRoomReport(
   ])).slice(0, 6);
   const evidence: DecisionReportEvidence = {
     roomTitle: room.title,
+    category: room.category || '기획',
     winnerIdeas: winnerIdeas.length > 0 ? winnerIdeas.map(idea => idea.title) : ['확정되지 않음'],
     winnerDescriptions: winnerIdeas.map(idea => idea.description).filter(Boolean),
     selectedReasons,

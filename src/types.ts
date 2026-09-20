@@ -269,6 +269,29 @@ export interface RoomDetails {
   participantCount?: number;
   voterSetup?: VoterSetupState;
   hasMyCriterionProposal?: boolean;
+  reportSafeSummary?: ReportSafeSummary;
+}
+
+export interface ReportSafeSummary {
+  finalizedCriteria: Array<Pick<Criterion, 'id' | 'name' | 'description'>>;
+  finalCandidates: Array<{
+    id: string;
+    title: string;
+    description: string;
+    finalStarTotal: number;
+    revoteStarTotal?: number;
+    selected: boolean;
+  }>;
+  process: {
+    initialProposalCount: number;
+    finalizedCriteriaCount: number;
+    scoreEvaluationCompleted: boolean;
+    scoreEvaluationSubmittedCount: number;
+    scoreEvaluationExpectedCount: number;
+    candidateCompressionCompleted: boolean;
+    finalCandidateCount: number;
+  };
+  detailsRestricted: boolean;
 }
 
 export interface VoterSetupState {

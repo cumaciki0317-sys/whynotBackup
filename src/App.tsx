@@ -92,6 +92,35 @@ type IdeaSaveProgress = {
   total: number;
 };
 
+function getCategoryCopy(category?: string | null) {
+  const isDesign = category === '디자인';
+  return isDesign
+    ? {
+        isDesign,
+        proposal: '시안',
+        proposalPlural: '디자인안',
+        proposalDescription: '디자인 설명',
+        finalSelection: '최종 디자인 시안',
+        rationaleSection: '디자인 판단 근거 및 보완 포인트',
+        concernLabel: '주요 보완 포인트',
+        unknownLabel: '미확인 사항',
+        validationLabel: '사용성 점검',
+        goal: '검토 시안 중 최종 디자인 시안'
+      }
+    : {
+        isDesign,
+        proposal: '아이디어',
+        proposalPlural: '기획안',
+        proposalDescription: '실행 내용',
+        finalSelection: '최종 실행안',
+        rationaleSection: '주요 논의 및 판단 근거',
+        concernLabel: '주요 우려',
+        unknownLabel: '핵심 가정',
+        validationLabel: '사용자 검증',
+        goal: '검토 후보 중 최종 실행안'
+      };
+}
+
 function getRoomStageLabel(status: RoomStatus): string {
   switch (status) {
     case 'DRAFT': return '준비 중';
@@ -3918,8 +3947,21 @@ export default function App() {
     if (!roomDetails || roomDetails.room.status !== 'CLOSED') return null;
 
     const room = roomDetails.room;
+    const categoryCopy = getCategoryCopy(room.category);
+    const reportSafeSummary = roomDetails.reportSafeSummary;
+    const useRestrictedSummary = roomDetails.myParticipantRole === 'VOTER' && Boolean(reportSafeSummary);
     const allIdeas = (roomDetails.ideas || []).filter(Boolean);
-    const winners = allIdeas.filter(idea => idea.status === 'WINNER');
+    const safeFinalCandidates: Idea[] = (reportSafeSummary?.finalCandidates || []).map(candidate => ({
+      id: candidate.id,
+      roomId: room.id,
+      title: candidate.title,
+      description: candidate.description,
+      submitterId: '',
+      submitterName: '익명 제안',
+      status: candidate.selected ? 'WINNER' : 'ELIMINATED'
+    }));
+    const reportIdeas = useRestrictedSummary ? safeFinalCandidates : allIdeas;
+    const winners = reportIdeas.filter(idea => idea.status === 'WINNER');
     const participants = (roomDetails.participants || []).filter(participant => participant.role !== 'VOTER');
     const participantNames = participants.map(participant => participant.nickname).filter(Boolean);
     const hostName = participants.find(participant => participant.userId === room.hostId)?.nickname || '방장';
@@ -3931,18 +3973,22 @@ export default function App() {
       .reverse()
       .find(round => round.completed);
     const scoreForIdea = (ideaId: string) => {
+      if (useRestrictedSummary) return undefined;
       const scoreStat = completedScoreRound?.scoreStats?.[ideaId];
       if (scoreStat) return scoreStat.totalScore;
       return roomDetails.aggregatedScores?.[ideaId]?.score;
     };
-    const candidateRows = [...allIdeas].sort((a, b) => {
+    const safeStarVotes = useRestrictedSummary
+      ? Object.fromEntries((reportSafeSummary?.finalCandidates || []).map(candidate => [candidate.id, candidate.finalStarTotal]))
+      : (roomDetails.starVotes || {});
+    const candidateRows = [...reportIdeas].sort((a, b) => {
       if (a.status === 'WINNER' && b.status !== 'WINNER') return -1;
       if (b.status === 'WINNER' && a.status !== 'WINNER') return 1;
-      const voteDifference = (roomDetails.starVotes?.[b.id] || 0) - (roomDetails.starVotes?.[a.id] || 0);
+      const voteDifference = (safeStarVotes[b.id] || 0) - (safeStarVotes[a.id] || 0);
       if (voteDifference !== 0) return voteDifference;
       return (scoreForIdea(b.id) || 0) - (scoreForIdea(a.id) || 0);
     });
-    const totalStars = Object.values(roomDetails.starVotes || {}).reduce<number>((sum, count) => sum + Number(count || 0), 0);
+    const totalStars = Object.values(safeStarVotes).reduce<number>((sum, count) => sum + Number(count || 0), 0);
     const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
       year: 'numeric',
       month: 'numeric',
@@ -3968,7 +4014,7 @@ export default function App() {
       .filter(Boolean)
       .join(', ');
     const candidateVoteSummary = candidateRows
-      .map(idea => `${idea.title} ${roomDetails.starVotes?.[idea.id] || 0}표`)
+      .map(idea => `${idea.title} ${safeStarVotes[idea.id] || 0}표`)
       .join(', ');
     const finalVoteCycle = roomDetails.finalVoteCycle;
     const rouletteDraws = finalVoteCycle?.rouletteDraws || [];
@@ -3977,7 +4023,7 @@ export default function App() {
     const recordedTieCandidateIds = (finalVoteCycle?.tieCandidateIdeaIds || []).length > 0
       ? finalVoteCycle?.tieCandidateIdeaIds || []
       : rouletteDraws[0]?.candidateIdeaIds || [];
-    const recordedTieCounts = recordedTieCandidateIds.map(ideaId => roomDetails.starVotes?.[ideaId] || 0);
+    const recordedTieCounts = recordedTieCandidateIds.map(ideaId => safeStarVotes[ideaId] || 0);
     const hasRecordedBoundaryTie = recordedTieCandidateIds.length > (finalVoteCycle?.tieSlots || 0) &&
       recordedTieCounts.length > 1 &&
       recordedTieCounts.every(count => count === recordedTieCounts[0]);
@@ -3996,7 +4042,7 @@ export default function App() {
         : null;
     const rouletteResultSummary = wasResolvedByRoulette
       ? rouletteDraws
-          .map(draw => allIdeas.find(idea => idea.id === draw.selectedIdeaId)?.title)
+          .map(draw => reportIdeas.find(idea => idea.id === draw.selectedIdeaId)?.title)
           .filter((title): title is string => Boolean(title))
           .join(', ')
       : null;
@@ -4024,11 +4070,28 @@ export default function App() {
           : '평가와 최종 투표 결과를 확정했습니다.';
     const finalResultSummary = `${winnerNames} 최종 선정${wasResolvedByRoulette ? ' (룰렛)' : wasTieRevote ? ' (별 재투표)' : ''}`;
     const selectedReasons = winners.map(winner => {
-      const voteCount = roomDetails.starVotes?.[winner.id] || 0;
+      const voteCount = safeStarVotes[winner.id] || 0;
       return `${winner.title}은(는) 최종 익명 누적 투표에서 ${voteCount}표를 받아 최종 선정되었습니다.`;
     });
     const report = roomDetails.decisionReport;
-    const fallbackActionItems = winners.length > 0 ? [
+    const fallbackActionItems = winners.length > 0 && categoryCopy.isDesign ? [
+      {
+        title: `${winners[0].title} 최종 시안 보완`,
+        completionCriteria: '회의에서 확인된 보완 포인트가 있는 경우 반영 범위와 우선순위를 검토합니다.'
+      },
+      {
+        title: '사용성 및 정보 전달 점검',
+        completionCriteria: '핵심 화면의 이해도와 주요 사용 흐름을 실제 사용자 관점에서 확인합니다.'
+      },
+      {
+        title: '반응형·모바일 적용 확인',
+        completionCriteria: '필요한 화면 크기별 레이아웃과 콘텐츠 우선순위를 점검합니다.'
+      },
+      {
+        title: '디자인 시스템 및 개발 전달 사항 정리',
+        completionCriteria: '컴포넌트, 상태, 규격과 구현 시 확인할 사항을 제안 목록으로 정리합니다.'
+      }
+    ] : winners.length > 0 ? [
       {
         title: `${winners[0].title} 실행 범위와 핵심 타깃 정의`,
         completionCriteria: '목표 사용자, 핵심 메시지와 실행 범위를 문서로 정리합니다.'
@@ -4049,27 +4112,39 @@ export default function App() {
     const actionItems = report?.suggestedActionItems?.length
       ? report.suggestedActionItems
       : fallbackActionItems;
-    const confirmedCriteriaCount = (roomDetails.criteria || []).filter(criterion => criterion.confirmed).length;
+    const criteriaRows = useRestrictedSummary
+      ? (reportSafeSummary?.finalizedCriteria || [])
+      : (roomDetails.criteria || []).filter(criterion => criterion.confirmed);
+    const confirmedCriteriaCount = criteriaRows.length;
     const criteriaEligibleCount = participantNames.length || roomDetails.participantCount || 0;
-    const criteriaCompletedCount = roomDetails.criteriaCompletedParticipantsCount || 0;
+    const criteriaCompletedCount = useRestrictedSummary
+      ? reportSafeSummary?.process.scoreEvaluationSubmittedCount || 0
+      : roomDetails.criteriaCompletedParticipantsCount || 0;
+    const registeredProposalCount = useRestrictedSummary
+      ? reportSafeSummary?.process.initialProposalCount || candidateRows.length
+      : allIdeas.length;
     const decisionSteps = room.decisionMode === 'QUICK'
       ? [
-          ['1단계 선택지', `${participantNames.length || roomDetails.participantCount || 0}명 참여`, '참여자가 선택지를 등록했습니다.', `후보 ${allIdeas.length}개 등록`],
+          [`1단계 ${categoryCopy.proposal}`, `${participantNames.length || roomDetails.participantCount || 0}명 참여`, `참여자가 ${categoryCopy.proposal}을(를) 등록했습니다.`, `${categoryCopy.proposal} ${registeredProposalCount}개 등록`],
           ['2단계 익명투표', finalVoteWasSkipped ? '최종 투표 생략' : `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, finalVoteActivity, finalVoteResultSummary],
           ['3단계 최종 결과', '최종 결과 확정', finalResultActivity, finalResultSummary]
         ]
       : [
-          ['1단계 아이디어', `${participantNames.length || roomDetails.participantCount || 0}명 참여`, '참여자가 익명으로 아이디어를 제안했습니다.', `후보 ${allIdeas.length}개 등록`],
-          ['2단계 평가 기준 설정', `${criteriaCompletedCount}/${criteriaEligibleCount}명 제안 완료`, '참여자들이 익명으로 평가 기준을 제안하고 공통 평가 기준을 검토했습니다.', `평가 기준 ${confirmedCriteriaCount}개 · 방장 최종 확정`],
-          ['3단계 점수·피드백', `${roomDetails.evaluationSubmittedCount || roomDetails.evaluatorsCount || 0}/${roomDetails.evaluationExpectedCount || participantNames.length || 0}명 완료`, '자기 아이디어를 제외하고 익명 평가했습니다.', candidateScoreSummary || '점수 평가 완료'],
+          [`1단계 ${categoryCopy.proposal}`, `${participantNames.length || roomDetails.participantCount || 0}명 참여`, `참여자가 익명으로 ${categoryCopy.proposal}을(를) 제안했습니다.`, `${categoryCopy.proposal} ${registeredProposalCount}개 등록`],
+          ['2단계 평가 기준 설정', useRestrictedSummary ? '내부 참여자 진행' : `${criteriaCompletedCount}/${criteriaEligibleCount}명 제안 완료`, '참여자들이 익명으로 평가 기준을 제안하고 공통 평가 기준을 검토했습니다.', `평가 기준 ${confirmedCriteriaCount}개 확정`],
+          ['3단계 점수·피드백', useRestrictedSummary ? (reportSafeSummary?.process.scoreEvaluationCompleted ? '내부 평가 완료' : '내부 평가 진행') : `${roomDetails.evaluationSubmittedCount || roomDetails.evaluatorsCount || 0}/${roomDetails.evaluationExpectedCount || participantNames.length || 0}명 완료`, `자기 ${categoryCopy.proposal}을(를) 제외하고 익명 평가했습니다.`, useRestrictedSummary ? '개인별 점수와 피드백은 참여자에게만 공개됩니다.' : candidateScoreSummary || '점수 평가 완료'],
           ['4단계 최종 별투표', finalVoteWasSkipped ? '최종 투표 생략' : `${roomDetails.starVoteSubmittedCount || 0}/${roomDetails.finalVoteExpectedCount || 0}명 완료`, finalVoteActivity, finalVoteResultSummary],
           ['5단계 최종 결과', '최종 결과 확정', finalResultActivity, finalResultSummary]
         ];
 
     return {
       room,
+      categoryCopy,
       winners,
       candidateRows,
+      criteriaRows,
+      useRestrictedSummary,
+      safeStarVotes,
       participantNames,
       hostName,
       externalVoterCount,
@@ -4136,11 +4211,11 @@ export default function App() {
       '## 2. 회의 안건',
       `- 주요 안건: ${md(meetingMinutes.room.title)}`,
       `- 검토 후보: ${meetingMinutes.candidateRows.map(idea => md(idea.title)).join(', ')}`,
-      `- 결정 목표: 검토 후보 중 최종 실행 아이디어 ${meetingMinutes.room.targetWinnerCount || 1}개 선정`,
+      `- 결정 목표: ${meetingMinutes.categoryCopy.goal} ${meetingMinutes.room.targetWinnerCount || 1}개 선정`,
       '',
       '## 3. 최종 의사결정',
-      `- 최종 선정안: ${md(meetingMinutes.winnerNames)}`,
-      `- 실행 내용: ${meetingMinutes.winners.map(winner => `${md(winner.title)}: ${md(winner.description)}`).join(' / ')}`,
+      `- ${meetingMinutes.categoryCopy.finalSelection}: ${md(meetingMinutes.winnerNames)}`,
+      `- ${meetingMinutes.categoryCopy.proposalDescription}: ${meetingMinutes.winners.map(winner => `${md(winner.title)}: ${md(winner.description)}`).join(' / ')}`,
       `- 최종 투표 결과: ${md(meetingMinutes.finalVoteResultSummary)}`
     );
     if (meetingMinutes.tieResolutionSummary) {
@@ -4149,39 +4224,39 @@ export default function App() {
     if (meetingMinutes.rouletteResultSummary) {
       lines.push(`- 룰렛 결과: ${md(meetingMinutes.rouletteResultSummary)}`);
     }
-    lines.push(`- 최종 결론: ${md(meetingMinutes.winnerNames)}을(를) 최종 실행안으로 선정합니다.`);
+    lines.push(`- 최종 결론: ${md(meetingMinutes.winnerNames)}을(를) ${meetingMinutes.categoryCopy.finalSelection}(으)로 선정합니다.`);
 
     if (!isQuick) {
       lines.push('', `## ${criteriaSectionNumber}. 확정 평가 기준`);
-      const confirmedCriteria = (roomDetails?.criteria || []).filter(criterion => criterion.confirmed);
+      const confirmedCriteria = meetingMinutes.criteriaRows;
       if (confirmedCriteria.length > 0) {
         confirmedCriteria.forEach((criterion, index) => {
           lines.push(`${index + 1}. **${md(criterion.name)}**: ${md(criterion.description)}`);
         });
       } else {
-        lines.push('- 확정된 평가 기준 없음');
+        lines.push(meetingMinutes.useRestrictedSummary ? '- 확정 기준 요약을 확인할 수 없습니다.' : '- 확정된 평가 기준 없음');
       }
     }
 
-    lines.push('', `## ${candidateSectionNumber}. 후보별 평가 결과`);
+    lines.push('', `## ${candidateSectionNumber}. ${meetingMinutes.categoryCopy.proposal}별 평가 결과`);
     meetingMinutes.candidateRows.forEach(idea => {
       const score = meetingMinutes.scoreForIdea(idea.id);
       lines.push(`### ${md(idea.title)}`);
-      lines.push(`- 제안 내용: ${md(idea.description)}`);
-      if (!isQuick) lines.push(`- 평가 점수: ${score === undefined ? '-' : `${Number(score).toLocaleString('ko-KR')}점`}`);
-      lines.push(`- 별 투표: ${roomDetails?.starVotes?.[idea.id] || 0}표`);
+      lines.push(`- ${meetingMinutes.categoryCopy.proposalDescription}: ${md(idea.description)}`);
+      if (!isQuick && !meetingMinutes.useRestrictedSummary) lines.push(`- 평가 점수: ${score === undefined ? '-' : `${Number(score).toLocaleString('ko-KR')}점`}`);
+      lines.push(`- 별 투표: ${meetingMinutes.safeStarVotes[idea.id] || 0}표`);
       lines.push(`- 결과: ${idea.status === 'WINNER' ? '선정' : '미선정'}`, '');
     });
 
-    lines.push(`## ${evidenceSectionNumber}. 주요 논의 및 판단 근거`);
+    lines.push(`## ${evidenceSectionNumber}. ${meetingMinutes.categoryCopy.rationaleSection}`);
     const appendEvidence = (label: string, items: string[], fallback: string) => {
       lines.push(`### ${label}`);
       (items.length > 0 ? items : [fallback]).forEach(item => lines.push(`- ${md(item)}`));
     };
     appendEvidence('선정 근거', meetingMinutes.selectedReasons, '최종 투표 결과에 따라 선정되었습니다.');
-    appendEvidence('주요 우려', meetingMinutes.majorConcerns, '수집된 평가에서 반복적으로 확인된 주요 우려가 없습니다.');
-    appendEvidence('미확인 가정', meetingMinutes.unverifiedAssumptions, '현재 자료만으로 확인하기 어려운 가정은 실행 단계에서 별도로 확인해야 합니다.');
-    appendEvidence('후속 검증', meetingMinutes.validationTasks, '작은 범위의 실행 또는 사용자 테스트로 핵심 가정을 먼저 검증합니다.');
+    appendEvidence(meetingMinutes.categoryCopy.concernLabel, meetingMinutes.majorConcerns, meetingMinutes.categoryCopy.isDesign ? '수집된 평가에서 반복적으로 확인된 보완 포인트가 없습니다.' : '수집된 평가에서 반복적으로 확인된 주요 우려가 없습니다.');
+    appendEvidence(meetingMinutes.categoryCopy.unknownLabel, meetingMinutes.unverifiedAssumptions, '현재 자료만으로 확인하기 어려운 사항은 후속 단계에서 별도로 확인해야 합니다.');
+    appendEvidence(meetingMinutes.categoryCopy.validationLabel, meetingMinutes.validationTasks, meetingMinutes.categoryCopy.isDesign ? '필요한 사용성 점검 항목은 후속 논의에서 정합니다.' : '작은 범위의 실행 또는 사용자 테스트로 핵심 가정을 먼저 검증합니다.');
 
     lines.push('', `## ${historySectionNumber}. 의사결정 진행 기록`);
     meetingMinutes.decisionSteps.forEach(([step, participation, activity, result]) => {
@@ -4193,6 +4268,9 @@ export default function App() {
         ''
       );
     });
+    if (meetingMinutes.useRestrictedSummary) {
+      lines.push('개인별 점수, 피드백 및 별 배분 내역은 내부 참여자에게만 공개됩니다.', '');
+    }
 
     lines.push(`## ${actionSectionNumber}. AI 제안 실행 과제 및 후속 조치`);
     meetingMinutes.actionItems.forEach((item, index) => {
@@ -4204,6 +4282,7 @@ export default function App() {
         '   - 상태: 논의 필요'
       );
     });
+    lines.push('', '위 항목은 평가 근거를 바탕으로 생성된 AI 제안이며 확정된 업무 지시가 아닙니다.');
 
     lines.push('', '---', `회의 ID: ${md(meetingMinutes.room.id)}`, 'WhyNot에서 생성된 의사결정 기록');
     const markdown = `${lines.join('\n').trim()}\n`;
@@ -5408,16 +5487,28 @@ export default function App() {
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-                      <div className="space-y-1">
+                      <div className="space-y-1 sm:col-span-2">
                         <label className="text-xs font-bold text-slate-700">카테고리</label>
-                        <select
-                          value={newRoomCategory}
-                          onChange={e => setNewRoomCategory(e.target.value as any)}
-                          className="w-full px-4 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold text-slate-700"
-                        >
-                          <option value="기획">기획</option>
-                          <option value="디자인">디자인</option>
-                        </select>
+                        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="회의 카테고리">
+                          {([
+                            ['기획', '서비스·기능·정책·전략 등 무엇을 할지 결정할 때'],
+                            ['디자인', '화면·브랜딩·시안 등 어떻게 보여줄지 결정할 때']
+                          ] as const).map(([value, description]) => (
+                            <button
+                              key={value}
+                              type="button"
+                              role="radio"
+                              aria-checked={newRoomCategory === value}
+                              onClick={() => setNewRoomCategory(value)}
+                              className={`min-h-20 border p-3 text-left transition ${newRoomCategory === value
+                                ? 'border-indigo-500 bg-indigo-50 text-indigo-950'
+                                : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'}`}
+                            >
+                              <span className="block text-sm font-extrabold">{value}</span>
+                              <span className="mt-1 block text-[11px] leading-4 text-slate-600">{description}</span>
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
                       <div className="space-y-1">
@@ -5890,7 +5981,7 @@ export default function App() {
                           ]
                         : isV7Room
                           ? [
-                              { key: 'IDEA_SUBMISSION', label: '1단계 : 아이디어', badge: '1' },
+                              { key: 'IDEA_SUBMISSION', label: `1단계 : ${getCategoryCopy(roomDetails.room.category).proposal}`, badge: '1' },
                               { key: 'CRITERIA_PROPOSAL', label: '2단계 : 평가 기준 설정', badge: '2' },
                               { key: 'EVALUATION', label: '3단계 : 1차 점수·피드백', badge: '3' },
                               ...(hasV7SecondScoreRound
@@ -5900,7 +5991,7 @@ export default function App() {
                               { key: 'CLOSED', label: '5단계 : 최종 결과', badge: '5' }
                             ]
                           : [
-                              { key: 'IDEA_SUBMISSION', label: '1단계 : 아이디어' },
+                              { key: 'IDEA_SUBMISSION', label: `1단계 : ${getCategoryCopy(roomDetails.room.category).proposal}` },
                               { key: 'CRITERIA_PROPOSAL', label: '2단계 : 평가 기준 설정' },
                               { key: 'EVALUATION', label: '3단계 : 종합점수 및 익명 피드백' },
                               { key: 'ELIMINATION', label: '4단계 : 2차 투표' },
@@ -6176,7 +6267,7 @@ export default function App() {
                       <div className="lg:col-span-7 space-y-4">
                         <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                           <h2 className="text-base font-extrabold text-slate-900 flex items-center gap-1.5">
-                            제출된 아이디어 목록 ({(roomDetails.ideas || []).length}개)
+                            제출된 {getCategoryCopy(roomDetails.room.category).proposal} 목록 ({(roomDetails.ideas || []).length}개)
                           </h2>
                           <span className="text-xs text-indigo-600 font-bold bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-100">
                             🔒 100% 익명 보장
@@ -6189,9 +6280,9 @@ export default function App() {
                             <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto text-xl font-bold">
                               💡
                             </div>
-                            <h3 className="text-base font-bold text-slate-900">아직 등록된 아이디어가 없습니다!</h3>
+                            <h3 className="text-base font-bold text-slate-900">아직 등록된 {getCategoryCopy(roomDetails.room.category).proposal}이(가) 없습니다!</h3>
                             <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
-                              우측 등록 양식에서 아이디어를 익명으로 작성해 주세요. 참여자마다 최소 1개, 최대 3개까지 등록할 수 있습니다.
+                              우측 등록 양식에서 {getCategoryCopy(roomDetails.room.category).proposal}을(를) 익명으로 작성해 주세요. 참여자마다 최소 1개, 최대 3개까지 등록할 수 있습니다.
                             </p>
                           </div>
                         ) : (
@@ -6222,7 +6313,7 @@ export default function App() {
 
                                     <div className="space-y-3">
                                       <div className="space-y-1">
-                                        <label className="text-xs font-bold text-slate-700">아이디어 제목 <span className="text-rose-500">*</span></label>
+                                        <label className="text-xs font-bold text-slate-700">{getCategoryCopy(roomDetails.room.category).proposal} 제목 <span className="text-rose-500">*</span></label>
                                         <input
                                           type="text"
                                           value={editIdeaTitle}
@@ -6232,7 +6323,7 @@ export default function App() {
                                       </div>
 
                                       <div className="space-y-1">
-                                        <label className="text-xs font-bold text-slate-700">아이디어 상세 설명 <span className="text-rose-500">*</span></label>
+                                        <label className="text-xs font-bold text-slate-700">{getCategoryCopy(roomDetails.room.category).proposalDescription} <span className="text-rose-500">*</span></label>
                                         <textarea
                                           value={editIdeaDesc}
                                           onChange={e => setEditIdeaDesc(e.target.value)}
@@ -6451,7 +6542,7 @@ export default function App() {
                         <div className="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                           <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                             <h2 className="text-base font-bold text-slate-900">
-                              내 아이디어 등록하기 (익명)
+                              내 {getCategoryCopy(roomDetails.room.category).proposal} 등록하기 (익명)
                             </h2>
                             <span className="text-[11px] font-bold text-slate-500">
                               (내 제출: {(roomDetails.ideas || []).filter(i => i.submitterId === userId).length}/3개)
@@ -6460,7 +6551,7 @@ export default function App() {
 
                           <form onSubmit={handleSubmitIdea} className="space-y-4">
                             <div className="space-y-1">
-                              <label className="text-xs font-bold text-slate-700">아이디어 제목 <span className="text-rose-500">*</span></label>
+                              <label className="text-xs font-bold text-slate-700">{getCategoryCopy(roomDetails.room.category).proposal} 제목 <span className="text-rose-500">*</span></label>
                               <input
                                 type="text"
                                 required
@@ -6472,7 +6563,7 @@ export default function App() {
                             </div>
 
                               <div className="space-y-1">
-                                <label className="text-xs font-bold text-slate-700">아이디어 상세 설명 <span className="text-rose-500">*</span></label>
+                                <label className="text-xs font-bold text-slate-700">{getCategoryCopy(roomDetails.room.category).proposalDescription} <span className="text-rose-500">*</span></label>
                               <textarea
                                 required
                                 value={ideaDesc}
@@ -9066,7 +9157,7 @@ export default function App() {
                                   <th>참여 인원</th><td>{meetingMinutes.participantNames.length || roomDetails.participantCount || 0}명</td>
                                 </tr>
                                 <tr>
-                                  <th>참석자</th><td>{meetingMinutes.participantNames.join(', ') || '참여자 정보 없음'}</td>
+                                  <th>참석자</th><td>{meetingMinutes.participantNames.join(', ') || (meetingMinutes.useRestrictedSummary ? '내부 참여자 명단 비공개' : '참여자 정보 없음')}</td>
                                   <th>외부 투표자</th><td>{meetingMinutes.externalVoterCount > 0 ? `${meetingMinutes.externalVoterCount}명` : '없음'}</td>
                                 </tr>
                                 {meetingMinutes.room.description?.trim() && (
@@ -9084,7 +9175,7 @@ export default function App() {
                               <tbody>
                                 <tr><th>주요 안건</th><td>{meetingMinutes.room.title}</td></tr>
                                 <tr><th>검토 후보</th><td>{meetingMinutes.candidateRows.map(idea => idea.title).join(', ')}</td></tr>
-                                <tr><th>결정 목표</th><td>검토 후보 중 최종 실행 아이디어 {meetingMinutes.room.targetWinnerCount || 1}개 선정</td></tr>
+                                <tr><th>결정 목표</th><td>{meetingMinutes.categoryCopy.goal} {meetingMinutes.room.targetWinnerCount || 1}개 선정</td></tr>
                                 <tr><th>진행 방식</th><td>{meetingMinutes.room.decisionMode === 'QUICK' ? '선택지 등록 → 익명 누적 별 투표 → 최종 결과 확정' : '공통 평가 기준 확정 → 익명 점수·피드백 → 누적 별 투표 → 최종 결과 확정'}</td></tr>
                               </tbody>
                             </table>
@@ -9094,9 +9185,9 @@ export default function App() {
                             <h2 className="meeting-minutes-section-title">3. 최종 의사결정</h2>
                             <table className="meeting-minutes-table">
                               <tbody>
-                                <tr><th>최종 선정안</th><td className="font-black text-slate-950">{meetingMinutes.winnerNames}</td></tr>
+                                <tr><th>{meetingMinutes.categoryCopy.finalSelection}</th><td className="font-black text-slate-950">{meetingMinutes.winnerNames}</td></tr>
                                 <tr>
-                                  <th>실행 내용</th>
+                                  <th>{meetingMinutes.categoryCopy.proposalDescription}</th>
                                   <td>{meetingMinutes.winners.map(winner => `${winner.title}: ${winner.description}`).join(' / ')}</td>
                                 </tr>
                                 <tr><th>최종 투표 결과</th><td>{meetingMinutes.finalVoteResultSummary}</td></tr>
@@ -9106,7 +9197,7 @@ export default function App() {
                                 {meetingMinutes.rouletteResultSummary && (
                                   <tr><th>룰렛 결과</th><td>{meetingMinutes.rouletteResultSummary}</td></tr>
                                 )}
-                                <tr><th>최종 결론</th><td>{meetingMinutes.winnerNames}을(를) 최종 실행안으로 선정합니다.</td></tr>
+                                <tr><th>최종 결론</th><td>{meetingMinutes.winnerNames}을(를) {meetingMinutes.categoryCopy.finalSelection}(으)로 선정합니다.</td></tr>
                               </tbody>
                             </table>
                           </section>
@@ -9117,19 +9208,20 @@ export default function App() {
                               <table className="meeting-minutes-table">
                                 <thead><tr><th className="w-14">번호</th><th className="w-48">평가 기준</th><th>판단 내용</th></tr></thead>
                                 <tbody>
-                                  {(roomDetails.criteria || []).filter(criterion => criterion.confirmed).map((criterion, index) => (
+                                  {meetingMinutes.criteriaRows.map((criterion, index) => (
                                     <tr key={criterion.id}><td className="text-center">{index + 1}</td><td className="font-bold">{criterion.name}</td><td>{criterion.description}</td></tr>
                                   ))}
+                                  {meetingMinutes.criteriaRows.length === 0 && <tr><td colSpan={3}>{meetingMinutes.useRestrictedSummary ? '확정 기준 요약을 확인할 수 없습니다.' : '확정된 평가 기준이 없습니다.'}</td></tr>}
                                 </tbody>
                               </table>
                             </section>
                           )}
 
                           <section className="meeting-minutes-section">
-                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '4' : '5'}. 후보별 평가 결과</h2>
+                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '4' : '5'}. {meetingMinutes.categoryCopy.proposal}별 평가 결과</h2>
                             <table className="meeting-minutes-table">
                               <thead>
-                                <tr><th>후보</th><th>제안 내용</th>{meetingMinutes.room.decisionMode !== 'QUICK' && <th className="w-24">점수</th>}<th className="w-24">별 투표</th><th className="w-24">결과</th></tr>
+                                <tr><th>{meetingMinutes.categoryCopy.proposal}</th><th>{meetingMinutes.categoryCopy.proposalDescription}</th>{meetingMinutes.room.decisionMode !== 'QUICK' && !meetingMinutes.useRestrictedSummary && <th className="w-24">점수</th>}<th className="w-24">별 투표</th><th className="w-24">결과</th></tr>
                               </thead>
                               <tbody>
                                 {meetingMinutes.candidateRows.map(idea => {
@@ -9138,8 +9230,8 @@ export default function App() {
                                     <tr key={idea.id}>
                                       <td className="font-bold">{idea.title}</td>
                                       <td>{idea.description}</td>
-                                      {meetingMinutes.room.decisionMode !== 'QUICK' && <td className="text-center">{score === undefined ? '-' : `${Number(score).toLocaleString('ko-KR')}점`}</td>}
-                                      <td className="text-center">{roomDetails.starVotes?.[idea.id] || 0}표</td>
+                                      {meetingMinutes.room.decisionMode !== 'QUICK' && !meetingMinutes.useRestrictedSummary && <td className="text-center">{score === undefined ? '-' : `${Number(score).toLocaleString('ko-KR')}점`}</td>}
+                                      <td className="text-center">{meetingMinutes.safeStarVotes[idea.id] || 0}표</td>
                                       <td className={`text-center font-black ${idea.status === 'WINNER' ? 'text-indigo-700' : 'text-slate-500'}`}>{idea.status === 'WINNER' ? '선정' : '미선정'}</td>
                                     </tr>
                                   );
@@ -9149,13 +9241,13 @@ export default function App() {
                           </section>
 
                           <section className="meeting-minutes-section">
-                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '5' : '6'}. 주요 논의 및 판단 근거</h2>
+                            <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '5' : '6'}. {meetingMinutes.categoryCopy.rationaleSection}</h2>
                             <table className="meeting-minutes-table">
                               <tbody>
                                 <tr><th>선정 근거</th><td><ul>{meetingMinutes.selectedReasons.map(reason => <li key={reason}>{reason}</li>)}</ul></td></tr>
-                                <tr><th>주요 우려</th><td><ul>{meetingMinutes.majorConcerns.length > 0 ? meetingMinutes.majorConcerns.map(item => <li key={item}>{item}</li>) : <li>수집된 평가에서 반복적으로 확인된 주요 우려가 없습니다.</li>}</ul></td></tr>
-                                <tr><th>미확인 가정</th><td><ul>{meetingMinutes.unverifiedAssumptions.length > 0 ? meetingMinutes.unverifiedAssumptions.map(item => <li key={item}>{item}</li>) : <li>현재 자료만으로 확인하기 어려운 가정은 실행 단계에서 별도로 확인해야 합니다.</li>}</ul></td></tr>
-                                <tr><th>후속 검증</th><td><ul>{meetingMinutes.validationTasks.length > 0 ? meetingMinutes.validationTasks.map(item => <li key={item}>{item}</li>) : <li>작은 범위의 실행 또는 사용자 테스트로 핵심 가정을 먼저 검증합니다.</li>}</ul></td></tr>
+                                <tr><th>{meetingMinutes.categoryCopy.concernLabel}</th><td><ul>{meetingMinutes.majorConcerns.length > 0 ? meetingMinutes.majorConcerns.map(item => <li key={item}>{item}</li>) : <li>{meetingMinutes.categoryCopy.isDesign ? '수집된 평가에서 반복적으로 확인된 보완 포인트가 없습니다.' : '수집된 평가에서 반복적으로 확인된 주요 우려가 없습니다.'}</li>}</ul></td></tr>
+                                <tr><th>{meetingMinutes.categoryCopy.unknownLabel}</th><td><ul>{meetingMinutes.unverifiedAssumptions.length > 0 ? meetingMinutes.unverifiedAssumptions.map(item => <li key={item}>{item}</li>) : <li>현재 자료만으로 확인하기 어려운 사항은 후속 단계에서 별도로 확인해야 합니다.</li>}</ul></td></tr>
+                                <tr><th>{meetingMinutes.categoryCopy.validationLabel}</th><td><ul>{meetingMinutes.validationTasks.length > 0 ? meetingMinutes.validationTasks.map(item => <li key={item}>{item}</li>) : <li>{meetingMinutes.categoryCopy.isDesign ? '필요한 사용성 점검 항목은 후속 논의에서 정합니다.' : '작은 범위의 실행 또는 사용자 테스트로 핵심 가정을 먼저 검증합니다.'}</li>}</ul></td></tr>
                               </tbody>
                             </table>
                             <p className="meeting-minutes-note">위 내용은 참여자가 남긴 평가와 투표 데이터를 AI가 구조화한 요약이며, AI가 새로운 결론을 결정한 것이 아닙니다.</p>
@@ -9171,12 +9263,12 @@ export default function App() {
                                 ))}
                               </tbody>
                             </table>
-                            <p className="meeting-minutes-note">개별 평가와 투표 내용은 익명으로 보호되며, 최종 결과는 고정 명단 전원이 제출한 뒤 공개됩니다.</p>
+                            <p className="meeting-minutes-note">{meetingMinutes.useRestrictedSummary ? '내부 평가 과정은 집계 상태만 표시합니다. 개인별 점수, 피드백 및 별 배분 내역은 내부 참여자에게만 공개됩니다.' : '개별 평가와 투표 내용은 익명으로 보호되며, 최종 결과는 고정 명단 전원이 제출한 뒤 공개됩니다.'}</p>
                           </section>
 
                           <section className="meeting-minutes-section">
                             <h2 className="meeting-minutes-section-title">{meetingMinutes.room.decisionMode === 'QUICK' ? '7' : '8'}. AI 제안 실행 과제 및 후속 조치</h2>
-                            <p className="text-xs text-slate-600 mb-3">최종 선정 아이디어와 평가 과정에서 확인된 우려·미확인 사항을 바탕으로 AI가 제안한 실행 과제입니다.</p>
+                            <p className="text-xs text-slate-600 mb-3">최종 선정 {meetingMinutes.categoryCopy.proposal}과 평가 과정에서 확인된 내용을 바탕으로 AI가 제안한 후속 조치입니다.</p>
                             <table className="meeting-minutes-table">
                               <thead><tr><th className="w-12">번호</th><th>AI 제안 실행 과제</th><th className="w-24">담당자</th><th className="w-24">완료 기한</th><th>완료 기준</th><th className="w-24">상태</th></tr></thead>
                               <tbody>
