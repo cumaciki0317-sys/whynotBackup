@@ -4550,6 +4550,13 @@ export default function App() {
   const myDirectProposalsCount = Math.max(0, myProposals.length - myAiProposalsCount);
   const myProposalsCount = myProposals.length;
   const totalProposalsCount = roomDetails?.proposalsCount || (roomDetails?.proposals || []).length;
+  const criteriaCompletedCount = roomDetails?.criteriaCompletedParticipantsCount || 0;
+  const criteriaExpectedCount = Math.max(
+    1,
+    roomDetails?.criteriaExpectedParticipantsCount || roomDetails?.participantCount || 1
+  );
+  const allCriteriaProposalsCompleted = criteriaCompletedCount >= criteriaExpectedCount;
+  const hasCompletedCriteriaProposal = Boolean(roomDetails?.hasCompletedCriteriaProposal);
   const currentPendingAccountInvite = !activeRoomId && !landingInviteToken ? (pendingAccountInvites[0] || null) : null;
   const currentPendingParticipantInvite: PendingParticipantAccountInvite | null =
     currentPendingAccountInvite?.role === 'PARTICIPANT' ? currentPendingAccountInvite : null;
@@ -7004,23 +7011,45 @@ export default function App() {
                         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2">
                           <div className="flex items-center justify-between gap-3">
                             <div>
-                              <p className="text-xs font-extrabold text-slate-900">내 기준 제안 완료</p>
+                              <p className="text-xs font-extrabold text-slate-900">
+                                {allCriteriaProposalsCompleted
+                                  ? '모든 참여자가 기준 제안을 완료했습니다.'
+                                  : hasCompletedCriteriaProposal
+                                    ? '내 기준 제안을 완료했어요.'
+                                    : '평가 기준 제안 진행 중'}
+                              </p>
                               <p className="text-[11px] text-slate-500 mt-0.5">
-                                다른 사람의 제안은 전원이 완료할 때까지 보이지 않습니다.
+                                {allCriteriaProposalsCompleted
+                                  ? roomDetails.room.hostId === userId
+                                    ? '이제 익명으로 제안된 기준을 검토하고 공통 평가 기준을 정할 수 있습니다.'
+                                    : '방장이 공통 평가 기준 검토를 시작하면 자동으로 이동합니다.'
+                                  : hasCompletedCriteriaProposal
+                                    ? '다른 참여자의 제안을 기다리고 있습니다. 모두 완료하면 공통 평가 기준 검토로 진행됩니다.'
+                                    : '모든 참여자가 제안을 완료하면 공통 평가 기준 검토로 진행됩니다.'}
                               </p>
                             </div>
-                            <span className="text-xs font-bold text-indigo-600">
-                              {roomDetails.criteriaCompletedParticipantsCount || 0}명 완료
+                            <span className={`text-xs font-bold shrink-0 ${allCriteriaProposalsCompleted ? 'text-emerald-600' : 'text-indigo-600'}`}>
+                              {allCriteriaProposalsCompleted ? '✓' : '⏳'} {criteriaCompletedCount} / {criteriaExpectedCount}명 제안 완료
                             </span>
                           </div>
-                          <button
-                            type="button"
-                            onClick={handleCompleteCriteriaProposal}
-                            disabled={!roomDetails.hasMyCriterionProposal}
-                            className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white rounded-xl text-xs font-extrabold transition"
-                          >
-                            {roomDetails.hasMyCriterionProposal ? '기준 제안 완료하기' : '평가 기준 1개 등록 후 완료 가능'}
-                          </button>
+                          {!hasCompletedCriteriaProposal && !allCriteriaProposalsCompleted && (
+                            <>
+                              <p className="text-[11px] text-slate-600 text-center pt-1">
+                                {roomDetails.hasMyCriterionProposal
+                                  ? '더 제안할 기준이 없다면 제안을 완료해주세요.'
+                                  : 'AI 추천 또는 직접 작성으로 평가 기준을 1개 이상 제안해주세요.'}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={handleCompleteCriteriaProposal}
+                                disabled={!roomDetails.hasMyCriterionProposal}
+                                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white rounded-xl text-xs font-extrabold transition flex items-center justify-center gap-1.5"
+                              >
+                                <span>{roomDetails.hasMyCriterionProposal ? '기준 제안 완료' : '평가 기준 1개 등록 후 완료 가능'}</span>
+                                {roomDetails.hasMyCriterionProposal && <ArrowRight className="w-3.5 h-3.5" />}
+                              </button>
+                            </>
+                          )}
                         </div>
 
                         {/* Host Control: Triggers Clustering (CRIT-02 AI 자동 정리) */}
@@ -7049,7 +7078,7 @@ export default function App() {
                               ) : (
                                 <>
                                   <Sparkles className="w-3.5 h-3.5" />
-                                  AI로 평가 기준 정리하기
+                                  {roomDetails.criteriaProposalsRevealed ? '공통 평가 기준 검토로 이동' : 'AI로 평가 기준 정리하기'}
                                   <ArrowRight className="w-3.5 h-3.5" />
                                 </>
                               )}
@@ -7062,18 +7091,6 @@ export default function App() {
                           </div>
                         )}
 
-                        {/* Non-host Waiting Banner when all proposals are revealed */}
-                        {roomDetails.room.hostId !== userId && roomDetails.criteriaProposalsRevealed && (
-                          <div className="bg-indigo-50 border border-indigo-200 text-indigo-950 p-5 rounded-2xl space-y-2 shadow-xs">
-                            <div className="flex items-center gap-2 text-indigo-900 font-extrabold text-xs">
-                              <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
-                              <span>모든 참여자의 기준 제안이 완료됐어요! 🎉</span>
-                            </div>
-                            <p className="text-xs text-indigo-800 leading-relaxed">
-                              익명으로 제출된 평가 기준이 공개되었습니다. 방장이 AI 공통 평가 기준 정리를 시작하면 정리 결과를 함께 확인할 수 있습니다.
-                            </p>
-                          </div>
-                        )}
                       </div>
                     </div>
                   )}

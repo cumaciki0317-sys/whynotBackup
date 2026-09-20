@@ -7459,6 +7459,8 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
     proposalsCount: isExternalVoter ? 0 : visibleProposals.length,
     completedParticipantsCount,
     criteriaCompletedParticipantsCount,
+    criteriaExpectedParticipantsCount,
+    hasCompletedCriteriaProposal: criteriaCompletedSet.has(userId),
     criteriaProposalsRevealed,
     criteriaApproval: {
       version: getCriteriaSetVersion(room),

@@ -222,6 +222,8 @@ export interface RoomDetails {
   activeIdeaCount?: number;
   completedParticipantsCount?: number; // count of unique participants who submitted 1 or more ideas
   criteriaCompletedParticipantsCount?: number;
+  criteriaExpectedParticipantsCount?: number;
+  hasCompletedCriteriaProposal?: boolean;
   criteriaProposalsRevealed?: boolean;
   criteriaApproval?: CriteriaSetApprovalSummary;
   participants?: Participant[];
