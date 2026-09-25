@@ -54,9 +54,7 @@ import {
   PendingAccountInvite,
   PendingParticipantAccountInvite,
   PendingVoterAccountInvite,
-  ParticipantRole,
-  FeedbackReconstructionItem,
-  FeedbackReconstructionResponse
+  ParticipantRole
 } from './types';
 
 type RefinementFeedbackDraft = {
@@ -519,8 +517,6 @@ export default function App() {
   const [inputJoinCode, setInputJoinCode] = useState('');
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [roomDetails, setRoomDetails] = useState<RoomDetails | null>(null);
-  const [feedbackReconstructionByIdea, setFeedbackReconstructionByIdea] = useState<Record<string, FeedbackReconstructionItem>>({});
-  const [feedbackReconstructionLoadingByIdea, setFeedbackReconstructionLoadingByIdea] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [fetchRoomError, setFetchRoomError] = useState(false);
@@ -2103,105 +2099,25 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  const loadFeedbackReconstruction = async (ideaId: string, sourceRoundId: string) => {
-    const reconstructionKey = `${sourceRoundId}:${ideaId}`;
-    if (!activeRoomId || feedbackReconstructionLoadingByIdea[reconstructionKey]) return;
-
-    setFeedbackReconstructionLoadingByIdea(previous => ({ ...previous, [reconstructionKey]: true }));
-    try {
-      const response = await apiFetch(`/api/rooms/${activeRoomId}/feedback-reconstruction`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roundId: sourceRoundId })
-      });
-      const data: FeedbackReconstructionResponse | { error?: string } =
-        (await response.json().catch(() => ({}))) || {};
-      if (!response.ok) {
-        throw new Error(('error' in data && data.error) || '피드백을 불러오지 못했습니다.');
-      }
-      const responseRoundId = (data as FeedbackReconstructionResponse).roundId;
-      if (responseRoundId !== sourceRoundId) throw new Error('평가 회차가 변경되었습니다.');
-      const nextItems = (data as FeedbackReconstructionResponse).items || {};
-      setFeedbackReconstructionByIdea(previous => ({
-        ...previous,
-        ...Object.fromEntries(Object.entries(nextItems).map(([itemIdeaId, item]) => [`${responseRoundId}:${itemIdeaId}`, item]))
-      }));
-    } catch (error) {
-      setFeedbackReconstructionByIdea(previous => ({
-        ...previous,
-        [reconstructionKey]: { status: 'UNAVAILABLE', comments: [] }
-      }));
-      console.warn('Feedback reconstruction load failed:', error);
-    } finally {
-      setFeedbackReconstructionLoadingByIdea(previous => ({ ...previous, [reconstructionKey]: false }));
-    }
-  };
-
   const renderScoreFeedbackDisclosure = (
     ideaId: string,
-    survived: boolean,
     rawFeedbackItems: string[],
-    sourceRoundId: string | undefined,
-    feedbackKey: string,
-    survivorLabel: string
+    feedbackKey: string
   ) => {
     const expanded = Boolean(expandedIdeaIds[feedbackKey]);
-
-    if (survived) {
-      if (rawFeedbackItems.length === 0) return null;
-      return (
-        <div className="border-t border-slate-100 pt-3">
-          <button
-            type="button"
-            onClick={() => toggleIdeaExpanded(feedbackKey)}
-            className="text-xs font-bold text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1"
-          >
-            {survivorLabel} {rawFeedbackItems.length}건 {expanded ? '접기' : '보기'}
-            {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-          </button>
-          {expanded && (
-            <ul className="mt-3 space-y-2">
-              {rawFeedbackItems.map((feedback, index) => (
-                <li key={index} className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-xs text-slate-600 leading-relaxed">
-                  {feedback}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      );
-    }
-
-    const reconstructionKey = `${sourceRoundId || 'unknown'}:${ideaId}`;
-    const reconstruction = feedbackReconstructionByIdea[reconstructionKey];
-    const loadingReconstruction = Boolean(feedbackReconstructionLoadingByIdea[reconstructionKey]);
-    const status = loadingReconstruction && !reconstruction ? 'PROCESSING' : reconstruction?.status;
+    if (rawFeedbackItems.length === 0) return null;
 
     return (
       <div className="border-t border-slate-100 pt-3">
         <button
           type="button"
-          onClick={() => {
-            const willOpen = !expanded;
-            toggleIdeaExpanded(feedbackKey);
-            if (
-              willOpen &&
-              (!reconstruction || reconstruction.status === 'PROCESSING' || reconstruction.status === 'UNAVAILABLE')
-            ) {
-              if (sourceRoundId) void loadFeedbackReconstruction(ideaId, sourceRoundId);
-            }
-          }}
+          onClick={() => toggleIdeaExpanded(feedbackKey)}
           aria-expanded={expanded}
-          aria-controls={`feedback-reconstruction-${ideaId}`}
+          aria-controls={`score-feedback-${ideaId}`}
           className="w-full flex items-center justify-between gap-3 py-1 text-left group"
         >
-          <span className="inline-flex items-center gap-2">
-            <span className="text-xs font-bold text-indigo-600 group-hover:text-indigo-800">
-              {expanded ? '피드백 접기' : '피드백 보기'}
-            </span>
-            <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100">
-              AI 재구성
-            </span>
+          <span className="text-xs font-bold text-indigo-600 group-hover:text-indigo-800">
+            작성자 비공개 피드백 원문 {rawFeedbackItems.length}건 {expanded ? '접기' : '보기'}
           </span>
           {expanded
             ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
@@ -2209,34 +2125,14 @@ export default function App() {
         </button>
 
         {expanded && (
-          <div id={`feedback-reconstruction-${ideaId}`} className="mt-3" aria-live="polite">
-            {status === 'READY' && reconstruction && reconstruction.comments.length > 0 ? (
-              <>
-                <ul className="space-y-2">
-                  {reconstruction.comments.map((comment, index) => (
-                    <li key={`${ideaId}-reconstructed-${index}`} className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-xs text-slate-600 leading-relaxed">
-                      {comment.text}
-                    </li>
-                  ))}
-                </ul>
-                <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-                  참여자가 작성한 원문은 공개하지 않으며, AI가 원문의 의미를 보존해 재구성한 내용입니다.
-                </p>
-              </>
-            ) : status === 'INSUFFICIENT_EVIDENCE' ? (
-              <p className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-3">
-                표시할 수 있는 피드백이 충분하지 않습니다.
-              </p>
-            ) : status === 'UNAVAILABLE' ? (
-              <p className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-3">
-                피드백을 안전하게 정리하지 못했습니다. 원문은 공개되지 않습니다.
-              </p>
-            ) : (
-              <div className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-3 flex items-center gap-2">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-500" />
-                피드백을 정리하고 있습니다.
-              </div>
-            )}
+          <div id={`score-feedback-${ideaId}`} className="mt-3">
+            <ul className="space-y-2">
+              {rawFeedbackItems.map((feedback, index) => (
+                <li key={`${ideaId}-feedback-${index}`} className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">
+                  {feedback}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </div>
@@ -3417,7 +3313,7 @@ export default function App() {
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.error || '평가 기준 확정에 실패했습니다.');
       await fetchRoomDetails(activeRoomId, false);
-      triggerToast(data?.message || '평가 기준이 확정되었습니다. 3단계 종합점수 및 익명 피드백을 시작합니다.');
+      triggerToast(data?.message || '평가 기준이 확정되었습니다. 3단계 종합점수 및 작성자 비공개 피드백을 시작합니다.');
     } catch (err) {
       const message = err instanceof Error ? err.message : '평가 기준 확정에 실패했습니다.';
       triggerToast(message, 'error');
@@ -3513,7 +3409,7 @@ export default function App() {
         return;
       }
       if (requiresFeedback && !submission.feedbackText.trim()) {
-        triggerToast(`"${idea.title}"의 익명 피드백을 작성해 주세요.`, 'error');
+        triggerToast(`"${idea.title}"의 작성자 비공개 피드백을 작성해 주세요.`, 'error');
         return;
       }
     }
@@ -3543,7 +3439,7 @@ export default function App() {
         } else {
           triggerToast(isSecondScoreRound
             ? '2차 종합점수를 모두 제출했습니다.'
-            : '1차 종합점수와 익명 피드백을 모두 제출했습니다.');
+            : '1차 종합점수와 작성자 비공개 피드백을 모두 제출했습니다.');
         }
         await fetchRoomDetails(activeRoomId!, false);
         return;
@@ -4887,7 +4783,7 @@ export default function App() {
                   {roomDetails.room.status === 'IDEA_SUBMISSION' && '1단계: 아이디어 등록 중'}
                   {roomDetails.room.status === 'CRITERIA_PROPOSAL' && '2단계: 기준 익명제안 중'}
                   {roomDetails.room.status === 'CRITERIA_REVIEW' && '2단계: 평가 기준 확정 중'}
-                  {roomDetails.room.status === 'EVALUATION' && '3단계: 1차 종합점수 및 익명 피드백 중'}
+                  {roomDetails.room.status === 'EVALUATION' && '3단계: 1차 종합점수 및 작성자 비공개 피드백 중'}
                   {roomDetails.room.status === 'EVALUATION_ROUND_2' && '추가 후보 압축: 2차 점수평가 중'}
                   {(roomDetails.room.status === 'ELIMINATION' || roomDetails.room.status === 'FINAL_VOTE') && ((roomDetails.room.engineVersion || 1) >= 7 ? '4단계: 최종 별 투표 중' : (roomDetails.room.finalVoteStatus === 'NOT_STARTED' ? '3단계: 1차 평가 결과' : '4단계: 2차 익명 투표 중'))}
                   {roomDetails.room.status === 'CLOSED' && ((roomDetails.room.engineVersion || 1) >= 7 ? '5단계: 최종 결과' : '완료 (최종 선정)')}
@@ -6000,7 +5896,7 @@ export default function App() {
                           : [
                               { key: 'IDEA_SUBMISSION', label: `1단계 : ${getCategoryCopy(roomDetails.room.category).proposal}` },
                               { key: 'CRITERIA_PROPOSAL', label: '2단계 : 평가 기준 설정' },
-                              { key: 'EVALUATION', label: '3단계 : 종합점수 및 익명 피드백' },
+                              { key: 'EVALUATION', label: '3단계 : 종합점수 및 작성자 비공개 피드백' },
                               { key: 'ELIMINATION', label: '4단계 : 2차 투표' },
                               { key: 'CLOSED', label: '5단계 : 최종 결과' }
                             ]
@@ -6082,7 +5978,7 @@ export default function App() {
                               <>
                                 {roomDetails.room?.status === 'IDEA_SUBMISSION' && '1단계 : 아이디어'}
                                 {(roomDetails.room?.status === 'CRITERIA_PROPOSAL' || roomDetails.room?.status === 'CRITERIA_REVIEW') && '2단계 : 평가 기준 설정'}
-                                {roomDetails.room?.status === 'EVALUATION' && '3단계 : 1차 종합점수 및 익명 피드백'}
+                                {roomDetails.room?.status === 'EVALUATION' && '3단계 : 1차 종합점수 및 작성자 비공개 피드백'}
                                 {roomDetails.room?.status === 'EVALUATION_ROUND_2' && '추가 후보 압축 : 2차 점수평가'}
                                 {(roomDetails.room?.status === 'ELIMINATION' || roomDetails.room?.status === 'FINAL_VOTE') && '4단계 : 최종 별 투표'}
                                 {roomDetails.room?.status === 'CLOSED' && '5단계 : 최종 결과'}
@@ -6091,7 +5987,7 @@ export default function App() {
                               <>
                                 {roomDetails.room?.status === 'IDEA_SUBMISSION' && '1단계 : 아이디어'}
                                 {(roomDetails.room?.status === 'CRITERIA_PROPOSAL' || roomDetails.room?.status === 'CRITERIA_REVIEW') && '2단계 : 평가 기준 설정'}
-                                {roomDetails.room?.status === 'EVALUATION' && '3단계 : 종합점수 및 익명 피드백'}
+                                {roomDetails.room?.status === 'EVALUATION' && '3단계 : 종합점수 및 작성자 비공개 피드백'}
                                 {roomDetails.room?.status === 'ELIMINATION' && '4단계 : 2차 투표'}
                                 {roomDetails.room?.status === 'CLOSED' && '5단계 : 최종 결과'}
                               </>
@@ -6664,7 +6560,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={handleEnterIdeaGate}
-                                  className="w-full py-2.5 bg-amber-400 text-slate-950 hover:bg-amber-300 rounded-xl text-xs font-black transition shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                                  className="w-full py-2.5 bg-amber-300 text-slate-950 rounded-xl text-xs font-bold hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed transition shadow-sm flex items-center justify-center gap-2"
                                 >
                                   <Sparkles className="w-4 h-4 text-slate-950" />
                                   <span>{getCategoryCopy(roomDetails.room.category).proposal} 제출 완료하기</span>
@@ -7052,20 +6948,13 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* Host Control: Triggers Clustering (CRIT-02 AI 자동 정리) */}
                         {roomDetails.room.hostId === userId && (
-                          <div className="bg-slate-900 text-white p-5 md:p-6 rounded-2xl space-y-4 shadow-md">
-                            <h3 className="text-sm font-bold flex items-center gap-1.5 text-amber-400">
-                              <Sparkles className="w-4 h-4 text-amber-400" />
-                              AI로 공통 평가 기준 정리
-                            </h3>
-                            <p className="text-xs text-slate-300 leading-relaxed">
-                              모든 참여자의 기준 제안이 완료되면, AI가 익명으로 제출된 기준의 중복·유사 의미를 분석하고 통합하여 모든 아이디어를 동일하게 비교할 수 있는 3~5개의 공통 평가 기준으로 정리합니다.
-                            </p>
-                            <p className="text-[11px] text-amber-300/90 bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60 leading-relaxed">
+                          <div className="bg-slate-900 text-white p-4 rounded-2xl shadow-sm space-y-3">
+                            <p className="text-[11px] text-slate-300 leading-relaxed">
                               💡 AI는 평가 기준을 대신 결정하지 않습니다. 팀의 제안을 구조화하여 최종 기준을 선택할 수 있도록 돕습니다.
                             </p>
                             <button
+                              type="button"
                               onClick={handleTriggerClustering}
                               disabled={!roomDetails.criteriaProposalsRevealed || roomDetails.proposalsCount === 0 || isClusteringLoading}
                               className="w-full py-2.5 bg-amber-400 text-slate-950 hover:bg-amber-300 disabled:opacity-40 transition rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:cursor-not-allowed"
@@ -7408,7 +7297,7 @@ export default function App() {
                                 <p className={`text-xs leading-relaxed max-w-2xl ${isSecondScoreRound ? 'text-indigo-100/90' : 'text-slate-500'}`}>
                                   {isSecondScoreRound
                                     ? '1차 평가를 통과한 후보만 다시 비교합니다. 새로운 피드백은 작성하지 않고 최종 후보 선정을 위한 1~10점만 입력합니다. 최대 4개 후보가 최종 별 투표 단계로 진출합니다.'
-                                    : '본인 아이디어를 제외한 모든 아이디어에 1~10점과 익명 피드백을 함께 남겨 강점과 우려를 폭넓게 수집합니다.'}
+                                    : '본인 아이디어를 제외한 모든 아이디어에 1~10점과 작성자 비공개 피드백을 함께 남겨 강점과 우려를 폭넓게 수집합니다.'}
                                 </p>
                               </div>
                               <div className={`text-xs font-extrabold px-4 py-2 rounded-xl shrink-0 ${isSecondScoreRound
@@ -7447,9 +7336,9 @@ export default function App() {
                               <div>
                                 <h3 className="text-lg font-extrabold text-slate-900">내 평가 제출 완료</h3>
                                 <p className="text-xs text-slate-500 mt-1">
-                                  {isSecondScoreRound
-                                    ? '모든 참여자가 제출하면 서버가 상위 4개를 확정하고 결과를 동시에 공개합니다.'
-                                    : '모든 참여자가 제출하면 서버가 상위 40%를 계산하며, 경계 점수가 같으면 해당 동점 후보는 모두 진출합니다.'}
+                                  모든 참여자의 평가가 완료되면 점수를 바탕으로 다음 단계 후보가 자동 선정됩니다.
+                                  <br />
+                                  컷라인에서 동점인 후보는 함께 다음 단계로 진출합니다.
                                 </p>
                               </div>
                               <div className="flex flex-wrap items-center justify-center gap-2">
@@ -7619,7 +7508,7 @@ export default function App() {
                                     {requiresFeedback && <div className="space-y-2">
                                       <div className="flex items-center justify-between gap-2">
                                         <label className="text-xs font-extrabold text-slate-800">
-                                          익명 피드백 <span className="text-rose-500">*</span>
+                                          작성자 비공개 피드백 <span className="text-rose-500">*</span>
                                         </label>
                                         <span className="text-[10px] text-slate-400">{submission.feedbackText.length}/500</span>
                                       </div>
@@ -7632,7 +7521,8 @@ export default function App() {
                                         className="w-full px-4 py-3 border border-slate-200 rounded-xl text-xs font-medium resize-y focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                       />
                                       <p className="text-[10px] text-emerald-700 font-medium">
-                                        탈락한 아이디어의 피드백 원문은 공개하지 않습니다. 결과 화면에는 익명성을 보호하기 위해 AI가 의미를 보존해 재구성한 내용만 제공됩니다.
+                                        작성자 정보는 표시되지 않지만, 참여 인원이나 피드백 내용에 따라 작성자가 추측될 수 있습니다.<br />
+                                        작성한 피드백은 결과 화면에 원문 그대로 공개되므로 개인정보나 본인을 특정할 수 있는 표현은 입력하지 마세요.
                                       </p>
                                     </div>}
                                   </motion.div>
@@ -7657,7 +7547,7 @@ export default function App() {
                                   }`}
                                 >
                                   <CheckCircle className="w-4 h-4" />
-                                  {isSecondScoreRound ? '최종 후보 선정을 위한 2차 점수 제출' : '1차 평가 및 익명 피드백 제출'}
+                                  {isSecondScoreRound ? '최종 후보 선정을 위한 2차 점수 제출' : '1차 평가 및 작성자 비공개 피드백 제출'}
                                 </button>
                               </div>
                             </div>
@@ -8234,11 +8124,8 @@ export default function App() {
                           )}
                           {renderScoreFeedbackDisclosure(
                             idea.id,
-                            survived,
                             feedbackItems,
-                            firstRound?.roundId,
-                            `v7_feedback_${latestRound?.roundId || 'final'}_${idea.id}`,
-                            '1차 익명 피드백 원문'
+                            `v7_feedback_${latestRound?.roundId || 'final'}_${idea.id}`
                           )}
                         </article>
                       );
@@ -8260,7 +8147,7 @@ export default function App() {
                             <div className="bg-indigo-950 text-indigo-100 rounded-2xl p-4 border border-indigo-800 space-y-2">
                               <h3 className="text-sm font-extrabold flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-300" /> 4위 경계 동률 AI 판정</h3>
                               <p className="text-xs leading-relaxed">{latestAi.summary}</p>
-                              <p className="text-[10px] text-indigo-300">확정 기준·아이디어 원문·방 내부 익명 피드백만 사용했으며 작성자 정보와 외부 데이터는 제공하지 않았습니다.</p>
+                              <p className="text-[10px] text-indigo-300">확정 기준·아이디어 원문·방 내부 참여자 피드백만 사용했으며 작성자 정보와 외부 데이터는 제공하지 않았습니다.</p>
                             </div>
                           )}
                           {latestRunoff?.used && (
@@ -8467,11 +8354,8 @@ export default function App() {
                                 </div>
                                 {renderScoreFeedbackDisclosure(
                                   idea.id,
-                                  false,
-                                  [],
-                                  firstRound.roundId,
-                                  `final_reference_feedback_${firstRound.roundId}_${idea.id}`,
-                                  ''
+                                  firstRound.anonymousFeedbackByIdea?.[idea.id] || [],
+                                  `final_reference_feedback_${firstRound.roundId}_${idea.id}`
                                 )}
                               </article>
                             );
@@ -8560,11 +8444,8 @@ export default function App() {
 
                             {renderScoreFeedbackDisclosure(
                               idea.id,
-                              survived,
                               feedbackItems,
-                              scoreRound?.id,
-                              `score_feedback_${idea.id}`,
-                              '익명 피드백 원문'
+                              `score_feedback_${idea.id}`
                             )}
                           </div>
                         );
@@ -8644,7 +8525,7 @@ export default function App() {
                                         <Sparkles className="w-4 h-4 text-amber-300" /> 4위 경계 동률 AI 판정
                                       </h3>
                                       <p className="text-xs text-indigo-200 leading-relaxed">
-                                        {aiTiebreak.summary || '확정 평가 기준, 아이디어 원문, 익명 피드백만 사용해 남은 자리를 비교했습니다.'}
+                                        {aiTiebreak.summary || '확정 평가 기준, 아이디어 원문, 작성자 정보가 제거된 참여자 피드백만 사용해 남은 자리를 비교했습니다.'}
                                       </p>
                                       <p className="text-[10px] text-indigo-300">
                                         외부 데이터와 작성자 정보는 사용하지 않았으며, 서로 다른 사용자 총점 순위는 변경하지 않았습니다.
@@ -8654,9 +8535,9 @@ export default function App() {
                                   <div className="bg-white p-5 rounded-2xl border border-indigo-200 shadow-sm space-y-4">
                                     <div>
                                       <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
-                                        <Sparkles className="w-4 h-4 text-indigo-600" /> AI 익명 피드백 정리
+                                        <Sparkles className="w-4 h-4 text-indigo-600" /> AI 피드백 종합 요약
                                       </h3>
-                                      <p className="text-[10px] text-slate-500 mt-1">전체 피드백 요약은 참고용입니다. 후보 선정에는 위 4위 경계 동률 판정만 제한적으로 사용됩니다.</p>
+                                      <p className="text-[10px] text-slate-500 mt-1">참여자가 작성한 평가 내용을 바탕으로 AI가 반복되는 강점과 우려를 정리한 참고용 요약입니다. 피드백 원문을 대체하지 않습니다.</p>
                                     </div>
                                     {screeningSummary?.aiAvailable && (
                                       (screeningSummary.recurringStrengths || []).length > 0 ||

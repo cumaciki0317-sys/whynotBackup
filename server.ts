@@ -99,9 +99,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// WHYNOT_FEEDBACK_RECONSTRUCTION_V13: response-level privacy guard.
-// Score-eliminated ideas must never expose evaluator wording through room-details APIs.
-function isScoreEliminatedIdeaPayload(idea: any): boolean {
+// Legacy rooms keep the historical rule that score-eliminated ideas do not
+// expose evaluator wording. Current structured rooms use the role-filtered
+// room-details response below and disclose author-unlinked originals to core
+// participants only.
+function isLegacyScoreEliminatedIdeaPayload(idea: any): boolean {
   return Boolean(
     idea &&
     idea.status === 'ELIMINATED' &&
@@ -122,10 +124,11 @@ app.use((req, res, next) => {
 
   const originalJson = res.json.bind(res);
   res.json = ((body: any) => {
-    if (body?.room && Array.isArray(body?.ideas)) {
+    const isLegacyRoom = Number(body?.room?.engineVersion || 1) < 5;
+    if (isLegacyRoom && Array.isArray(body?.ideas)) {
       const blockedIds = new Set<string>(
         body.ideas
-          .filter((idea: any) => isScoreEliminatedIdeaPayload(idea))
+          .filter((idea: any) => isLegacyScoreEliminatedIdeaPayload(idea))
           .map((idea: any) => String(idea.id))
       );
 
@@ -7515,7 +7518,7 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
     const scoreRowsForRound = allRoomEvals.filter(evaluation => evaluation.roundId === scoreRound.id);
     const feedbackByIdea = scoreRound.evaluationMethod === 'SCORE_FEEDBACK'
       ? scoreRowsForRound.reduce<Record<string, string[]>>((grouped, evaluation) => {
-          const feedback = maskAnonymousEvidence(String(evaluation.feedbackText || '').trim());
+          const feedback = String(evaluation.feedbackText || '').trim();
           if (!feedback) return grouped;
           if (!grouped[evaluation.ideaId]) grouped[evaluation.ideaId] = [];
           grouped[evaluation.ideaId].push(feedback);
@@ -7628,7 +7631,7 @@ app.get('/api/rooms/:id', async (req: AuthenticatedRequest, res) => {
       const feedback = evaluation.feedbackText?.trim();
       if (!feedback) return grouped;
       if (!grouped[evaluation.ideaId]) grouped[evaluation.ideaId] = [];
-      grouped[evaluation.ideaId].push(maskAnonymousEvidence(feedback));
+      grouped[evaluation.ideaId].push(feedback);
       return grouped;
     }, {});
   } else if (mayRevealEvaluationResults) {
@@ -7949,7 +7952,7 @@ app.post('/api/rooms/:id/re-edit-status', async (req: AuthenticatedRequest, res)
 });
 
 /**
- * 5-1. 종합점수(1~10) + 필수 익명 피드백 일괄 제출
+ * 5-1. 종합점수(1~10) + 필수 작성자 비공개 피드백 일괄 제출
  */
 app.post('/api/rooms/:id/evaluations', async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
@@ -8009,7 +8012,7 @@ app.post('/api/rooms/:id/evaluations', async (req: AuthenticatedRequest, res) =>
     if ((requiresFeedback && !feedback) || feedback.length > MAX_EVALUATION_FEEDBACK_LENGTH) {
       return res.status(400).json({
         error: requiresFeedback
-          ? `각 아이디어의 익명 피드백을 1~${MAX_EVALUATION_FEEDBACK_LENGTH}자로 작성해 주세요.`
+          ? `각 아이디어의 작성자 비공개 피드백을 1~${MAX_EVALUATION_FEEDBACK_LENGTH}자로 작성해 주세요.`
           : `피드백은 ${MAX_EVALUATION_FEEDBACK_LENGTH}자를 넘을 수 없습니다.`
       });
     }
